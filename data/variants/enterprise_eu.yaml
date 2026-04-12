@@ -1,0 +1,142 @@
+id: enterprise_eu
+name: "Enterprise EU"
+tier: enterprise
+region: eu
+description: >
+  Enterprise plan with EU data residency and full GDPR compliance.
+  All data stored and processed within EU-West-1. Includes mandatory
+  encryption, enhanced audit logging with right-to-erasure support,
+  and EU-specific data processing agreements.
+max_seats: -1
+components:
+  - component_id: auth_engine
+    features:
+      - basic_auth
+      - session_mgmt
+      - sso_saml
+      - sso_oidc
+      - mfa
+      - scim_provisioning
+    config_overrides:
+      max_sessions_per_user: -1
+      mfa_enabled: true
+      scim_enabled: true
+      session_data_residency: "eu-west-1"
+  - component_id: billing_core
+    features:
+      - subscription_mgmt
+      - invoice_generation
+      - usage_metering
+      - custom_contracts
+    config_overrides:
+      payment_providers: ["stripe_eu", "sepa_direct_debit", "wire_transfer"]
+      dunning_retries: 7
+      vat_handling: "reverse_charge"
+  - component_id: notification_service
+    features:
+      - email_notifications
+      - in_app_notifications
+      - webhook_delivery
+      - sms_notifications
+      - slack_integration
+    config_overrides:
+      channels: ["email", "in_app", "webhook", "sms", "slack"]
+      daily_limit: -1
+      email_provider_region: "eu-west-1"
+  - component_id: api_gateway
+    features:
+      - rest_api
+      - rate_limiting
+      - api_key_mgmt
+      - ip_allowlisting
+      - graphql_api
+    config_overrides:
+      rate_limit_rpm: 100000
+      allowed_origins: ["configured_per_tenant"]
+      geo_routing: "eu-only"
+  - component_id: search_service
+    features:
+      - basic_search
+      - advanced_filters
+      - saved_searches
+      - semantic_search
+    config_overrides:
+      index_refresh_interval_sec: 10
+      max_results: 1000
+      index_region: "eu-west-1"
+  - component_id: report_generator
+    features:
+      - standard_reports
+      - csv_export
+      - scheduled_reports
+      - custom_dashboards
+      - data_warehouse_sync
+    config_overrides:
+      max_scheduled_reports: -1
+      export_formats: ["csv", "pdf", "xlsx", "json"]
+  - component_id: pricing_engine
+    features:
+      - tiered_pricing
+      - volume_discounts
+      - custom_pricing
+      - multi_currency
+    config_overrides:
+      pricing_models: ["flat", "tiered", "per_seat", "custom"]
+      default_currency: "EUR"
+  - component_id: encryption_service
+    features:
+      - at_rest_encryption
+      - in_transit_encryption
+      - field_level_encryption
+      - byok
+    config_overrides:
+      key_rotation_days: 90
+      encryption_algorithm: "AES-256-GCM"
+      data_residency: "eu-west-1"
+      kms_region: "eu-west-1"
+  - component_id: data_exporter
+    features:
+      - bulk_export
+      - incremental_export
+      - encrypted_export
+      - compliance_export
+      - gdpr_portability_export
+    config_overrides:
+      max_export_size_gb: 50
+      retention_days: 30
+      storage_region: "eu-west-1"
+  - component_id: workflow_engine
+    features:
+      - basic_automations
+      - conditional_triggers
+      - multi_step_workflows
+      - approval_chains
+      - api_actions
+    config_overrides:
+      max_active_workflows: -1
+      trigger_types: ["event", "schedule", "webhook", "approval"]
+  - component_id: audit_logger
+    features:
+      - activity_log
+      - admin_audit
+      - compliance_audit
+      - log_export
+      - gdpr_erasure_log
+    config_overrides:
+      retention_days: 365
+      tamper_proof: true
+      gdpr_right_to_erasure: true
+  - component_id: websocket_gateway
+    features:
+      - real_time_updates
+      - presence
+      - typing_indicators
+      - live_collaboration
+    config_overrides:
+      max_connections_per_user: 20
+      heartbeat_interval_sec: 30
+      ws_region: "eu-west-1"
+metadata:
+  launched: "2024-07-15"
+  compliance: ["soc2", "gdpr", "eu_data_residency"]
+  sla_tier: critical

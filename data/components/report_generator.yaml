@@ -1,0 +1,37 @@
+id: report_generator
+name: "ReportGenerator"
+description: >
+  Business intelligence and reporting engine that generates scheduled and
+  on-demand reports. Supports standard templates (revenue, usage, activity)
+  and custom dashboards. Handles data aggregation, multi-currency formatting,
+  and exports to CSV, PDF, XLSX, and JSON. Can sync to external data warehouses.
+team_owner: "analytics-team"
+criticality: medium
+modules:
+  - module_id: template_engine
+    usage: "Renders report layouts from configurable templates with charts, tables, and summaries"
+    coupling: tight
+  - module_id: i18n_utils
+    usage: "Localizes report headers, labels, date formats, and number formatting per user locale"
+    coupling: tight
+  - module_id: currency_utils
+    usage: "Formats monetary values in reports with correct currency symbols and decimal precision"
+    coupling: tight
+  - module_id: db_connector
+    usage: "Executes aggregation queries against analytics database for report data sourcing"
+    coupling: tight
+  - module_id: file_storage
+    usage: "Stores generated report files (PDF, XLSX) in blob storage for download and archival"
+    coupling: tight
+  - module_id: query_builder
+    usage: "Constructs complex analytical SQL queries with grouping, filtering, and window functions"
+    coupling: tight
+  - module_id: job_scheduler
+    usage: "Manages scheduled report generation jobs (daily, weekly, monthly cadences)"
+    coupling: loose
+api_surface:
+  - "POST /api/v1/reports/generate"
+  - "GET  /api/v1/reports"
+  - "GET  /api/v1/reports/{id}/download"
+  - "POST /api/v1/reports/schedule"
+  - "GET  /api/v1/dashboards"

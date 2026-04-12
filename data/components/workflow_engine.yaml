@@ -1,0 +1,28 @@
+id: workflow_engine
+name: "WorkflowEngine"
+description: >
+  Automation engine for business process workflows. Supports event-triggered
+  and scheduled automations, multi-step workflows with conditional branching,
+  approval chains, and external API actions. Used for task routing, escalation
+  policies, onboarding sequences, and custom business logic automation.
+team_owner: "automation-team"
+criticality: high
+modules:
+  - module_id: event_bus
+    usage: "Subscribes to platform events that trigger workflow execution (task.created, deal.won, etc.)"
+    coupling: tight
+  - module_id: schema_validator
+    usage: "Validates workflow definitions and step configurations against the workflow DSL schema"
+    coupling: tight
+  - module_id: access_control
+    usage: "Enforces permission checks on workflow actions to prevent privilege escalation"
+    coupling: tight
+  - module_id: job_scheduler
+    usage: "Schedules delayed workflow steps, time-based triggers, and recurring workflow runs"
+    coupling: tight
+api_surface:
+  - "POST /api/v1/workflows"
+  - "GET  /api/v1/workflows"
+  - "PUT  /api/v1/workflows/{id}"
+  - "POST /api/v1/workflows/{id}/trigger"
+  - "GET  /api/v1/workflows/{id}/runs"

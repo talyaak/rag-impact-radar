@@ -1,0 +1,76 @@
+id: professional_global
+name: "Professional"
+tier: professional
+region: global
+description: >
+  Advanced plan for growing teams needing automation, reporting, and
+  deeper integrations. Adds workflow automation, business reporting,
+  dynamic pricing, and multi-channel notifications.
+max_seats: 100
+components:
+  - component_id: auth_engine
+    features:
+      - basic_auth
+      - session_mgmt
+      - sso_saml
+      - mfa
+    config_overrides:
+      max_sessions_per_user: 10
+      mfa_enabled: true
+  - component_id: billing_core
+    features:
+      - subscription_mgmt
+      - invoice_generation
+      - usage_metering
+    config_overrides:
+      payment_providers: ["stripe", "braintree"]
+      dunning_retries: 5
+  - component_id: notification_service
+    features:
+      - email_notifications
+      - in_app_notifications
+      - webhook_delivery
+    config_overrides:
+      channels: ["email", "in_app", "webhook"]
+      daily_limit: 5000
+  - component_id: api_gateway
+    features:
+      - rest_api
+      - rate_limiting
+      - api_key_mgmt
+    config_overrides:
+      rate_limit_rpm: 10000
+      allowed_origins: ["*"]
+  - component_id: search_service
+    features:
+      - basic_search
+      - advanced_filters
+      - saved_searches
+    config_overrides:
+      index_refresh_interval_sec: 60
+      max_results: 200
+  - component_id: report_generator
+    features:
+      - standard_reports
+      - csv_export
+      - scheduled_reports
+    config_overrides:
+      max_scheduled_reports: 20
+      export_formats: ["csv", "pdf"]
+  - component_id: pricing_engine
+    features:
+      - tiered_pricing
+      - volume_discounts
+    config_overrides:
+      pricing_models: ["flat", "tiered"]
+  - component_id: workflow_engine
+    features:
+      - basic_automations
+      - conditional_triggers
+    config_overrides:
+      max_active_workflows: 50
+      trigger_types: ["event", "schedule"]
+metadata:
+  launched: "2024-03-01"
+  compliance: []
+  sla_tier: premium

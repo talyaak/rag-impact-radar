@@ -1,0 +1,52 @@
+id: starter_eu
+name: "Starter EU"
+tier: starter
+region: eu
+description: >
+  Entry-level EU plan with GDPR compliance baseline. Same core features
+  as Starter Global but with EU data residency and GDPR-mandated data
+  handling practices applied to all components.
+max_seats: 10
+components:
+  - component_id: auth_engine
+    features:
+      - basic_auth
+      - session_mgmt
+    config_overrides:
+      max_sessions_per_user: 3
+      mfa_enabled: false
+      session_data_residency: "eu-west-1"
+  - component_id: billing_core
+    features:
+      - subscription_mgmt
+      - invoice_generation
+    config_overrides:
+      payment_providers: ["stripe_eu"]
+      dunning_retries: 3
+      vat_handling: "reverse_charge"
+  - component_id: notification_service
+    features:
+      - email_notifications
+    config_overrides:
+      channels: ["email"]
+      daily_limit: 100
+      email_provider_region: "eu-west-1"
+  - component_id: api_gateway
+    features:
+      - rest_api
+      - rate_limiting
+    config_overrides:
+      rate_limit_rpm: 1000
+      allowed_origins: ["*"]
+      geo_routing: "eu-only"
+  - component_id: search_service
+    features:
+      - basic_search
+    config_overrides:
+      index_refresh_interval_sec: 300
+      max_results: 50
+      index_region: "eu-west-1"
+metadata:
+  launched: "2024-04-01"
+  compliance: ["gdpr"]
+  sla_tier: standard

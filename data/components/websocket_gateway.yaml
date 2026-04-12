@@ -1,0 +1,27 @@
+id: websocket_gateway
+name: "WebSocketGateway"
+description: >
+  Real-time communication gateway managing persistent WebSocket connections
+  for live updates, presence indicators, typing notifications, and collaborative
+  editing. Handles connection lifecycle, heartbeats, reconnection, and message
+  fan-out to channel subscribers. Scales horizontally via Redis pub/sub.
+team_owner: "realtime-team"
+criticality: high
+modules:
+  - module_id: session_store
+    usage: "Maps WebSocket connections to authenticated user sessions for identity resolution"
+    coupling: tight
+  - module_id: websocket_protocol
+    usage: "WebSocket frame handling, heartbeat management, and protocol upgrade negotiation"
+    coupling: tight
+  - module_id: metrics_collector
+    usage: "Tracks active connections, message throughput, and reconnection rates per tenant"
+    coupling: loose
+  - module_id: retry_handler
+    usage: "Handles reconnection backoff and message redelivery for dropped connections"
+    coupling: tight
+api_surface:
+  - "GET  /ws/connect"
+  - "POST /api/v1/realtime/channels"
+  - "GET  /api/v1/realtime/presence"
+  - "POST /api/v1/realtime/broadcast"

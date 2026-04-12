@@ -1,0 +1,33 @@
+id: search_service
+name: "SearchService"
+description: >
+  Full-text and semantic search across all platform entities (projects, tasks,
+  contacts, documents). Builds and maintains search indexes, supports faceted
+  filtering, saved searches, and locale-aware query parsing. Powers the global
+  search bar and programmatic search API used by other services.
+team_owner: "search-team"
+criticality: high
+modules:
+  - module_id: query_builder
+    usage: "Constructs search DSL queries from user input with filters, facets, and boosting rules"
+    coupling: tight
+  - module_id: cache_layer
+    usage: "Caches frequent search queries and facet counts to reduce index pressure"
+    coupling: loose
+  - module_id: db_connector
+    usage: "Reads entity metadata from primary database for search result enrichment"
+    coupling: tight
+  - module_id: rate_limiter
+    usage: "Rate limits search API to prevent expensive query abuse and index overload"
+    coupling: tight
+  - module_id: metrics_collector
+    usage: "Tracks search latency, result click-through rates, and zero-result query patterns"
+    coupling: loose
+  - module_id: i18n_utils
+    usage: "Locale-aware query tokenization, stemming, and stop-word handling for multilingual search"
+    coupling: tight
+api_surface:
+  - "POST /api/v1/search"
+  - "GET  /api/v1/search/suggest"
+  - "POST /api/v1/search/saved"
+  - "GET  /api/v1/search/saved"

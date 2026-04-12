@@ -1,0 +1,24 @@
+id: audit_logger
+name: "AuditLogger"
+description: >
+  Tamper-proof audit logging service that records all administrative actions,
+  data access events, and security-relevant operations. Supports compliance
+  audit trails (SOC2, GDPR), log export for SIEM integration, and queryable
+  audit history with advanced filtering. Critical for enterprise compliance.
+team_owner: "security-team"
+criticality: high
+modules:
+  - module_id: event_bus
+    usage: "Subscribes to all platform events to capture audit-worthy actions in real time"
+    coupling: tight
+  - module_id: db_connector
+    usage: "Writes audit records to append-only audit database with integrity checksums"
+    coupling: tight
+  - module_id: query_builder
+    usage: "Constructs filtered audit log queries with time ranges, actor filters, and action types"
+    coupling: tight
+api_surface:
+  - "GET  /api/v1/audit/logs"
+  - "GET  /api/v1/audit/logs/{id}"
+  - "POST /api/v1/audit/export"
+  - "GET  /api/v1/audit/summary"

@@ -1,0 +1,24 @@
+id: pricing_engine
+name: "PricingEngine"
+description: >
+  Dynamic pricing calculation service that computes final prices based on
+  tier, volume, region, and promotional rules. Supports flat-rate, per-seat,
+  tiered, and usage-based pricing models. Handles multi-currency conversion
+  and tax-inclusive price computation for checkout and invoice flows.
+team_owner: "payments-team"
+criticality: high
+modules:
+  - module_id: tax_calculator
+    usage: "Computes tax-inclusive and tax-exclusive prices per jurisdiction for display and invoicing"
+    coupling: tight
+  - module_id: currency_utils
+    usage: "Converts prices between currencies at checkout using live exchange rates"
+    coupling: tight
+  - module_id: rate_limiter
+    usage: "Rate limits pricing API calls to prevent abuse from automated price scraping"
+    coupling: loose
+api_surface:
+  - "POST /api/v1/pricing/calculate"
+  - "GET  /api/v1/pricing/tiers"
+  - "GET  /api/v1/pricing/currencies"
+  - "POST /api/v1/pricing/quote"

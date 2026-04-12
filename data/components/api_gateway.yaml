@@ -1,0 +1,33 @@
+id: api_gateway
+name: "APIGateway"
+description: >
+  Central API routing and enforcement layer. Handles request authentication,
+  rate limiting, schema validation, IP allowlisting, and request/response
+  transformation. All external API traffic flows through this gateway before
+  reaching downstream services. Supports both REST and GraphQL endpoints.
+team_owner: "platform-team"
+criticality: critical
+modules:
+  - module_id: rate_limiter
+    usage: "Token-bucket rate limiting per API key, tenant, and endpoint with burst allowance"
+    coupling: tight
+  - module_id: access_control
+    usage: "Validates bearer tokens and enforces endpoint-level permission checks"
+    coupling: tight
+  - module_id: schema_validator
+    usage: "Validates incoming request payloads against JSON Schema definitions per endpoint"
+    coupling: tight
+  - module_id: cache_layer
+    usage: "Caches frequently requested read-only responses (GET endpoints) at the gateway level"
+    coupling: loose
+  - module_id: metrics_collector
+    usage: "Emits per-endpoint latency, error rate, and throughput metrics to observability stack"
+    coupling: loose
+  - module_id: config_loader
+    usage: "Loads route definitions, rate limit tiers, and feature flags from config service"
+    coupling: tight
+api_surface:
+  - "ANY  /api/v1/*"
+  - "POST /api/v1/graphql"
+  - "GET  /api/v1/health"
+  - "GET  /api/v1/openapi.json"

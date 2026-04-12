@@ -1,0 +1,56 @@
+# Impact Radar - Model & Pipeline Configuration
+#
+# RAG Learning Note: These are the core tuning knobs for the RAG pipeline.
+# - chunk_size/chunk_overlap control how component descriptions are split for embedding
+# - top_k controls how many candidate results the vector search returns
+# - similarity_threshold filters out low-relevance matches
+# - rerank implements a two-stage retrieval pattern: cast a wide net, then refine
+
+llm:
+  provider: "openai"
+  model: "gpt-4o"
+  temperature: 0.2          # Low temp for factual, consistent risk explanations
+  max_tokens: 4096
+  timeout_seconds: 30
+  max_retries: 3
+  retry_base_delay: 1.0     # Exponential backoff: 1s, 2s, 4s
+
+embedding:
+  provider: "openai"
+  model: "text-embedding-3-small"
+  dimensions: 1536
+  batch_size: 100
+
+vector_store:
+  provider: "chroma"
+  collection_name: "impact_radar_components"
+  persist_directory: "./chroma_db"
+  distance_metric: "cosine"
+
+chunking:
+  chunk_size: 512            # Tokens per chunk - balances context vs specificity
+  chunk_overlap: 64          # Overlap prevents losing context at chunk boundaries
+  separator: "\n\n"
+
+retrieval:
+  top_k: 10                  # First stage: retrieve 10 candidates from vector search
+  similarity_threshold: 0.7  # Minimum cosine similarity to include
+  rerank: true               # Second stage: rerank candidates for precision
+  rerank_top_k: 5            # Final output: top 5 after reranking
+
+graph:
+  max_traversal_depth: 5     # How many hops to follow in dependency graph
+  include_weak_coupling: true # Include loose/optional couplings in traversal
+  cycle_detection: true       # Essential - our seed data has intentional cycles
+
+analysis:
+  severity_weights:
+    coupling_tight: 1.0
+    coupling_loose: 0.5
+    coupling_optional: 0.2
+  criticality_multipliers:
+    critical: 4.0
+    high: 2.0
+    medium: 1.0
+    low: 0.5
+  variant_impact_threshold: 0.3  # Minimum score to flag a variant as affected

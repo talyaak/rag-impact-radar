@@ -1,0 +1,33 @@
+id: notification_service
+name: "NotificationService"
+description: >
+  Multi-channel notification delivery engine supporting email, SMS, push
+  notifications, in-app alerts, webhooks, and Slack integration. Renders
+  localized content from templates, manages user notification preferences,
+  and handles delivery retries with exponential backoff across all channels.
+team_owner: "platform-team"
+criticality: high
+modules:
+  - module_id: template_engine
+    usage: "Renders notification content from Mustache templates with dynamic variable substitution"
+    coupling: tight
+  - module_id: i18n_utils
+    usage: "Resolves user locale preferences and translates notification content strings"
+    coupling: tight
+  - module_id: event_bus
+    usage: "Subscribes to platform events that trigger notifications (invoice.paid, task.assigned, etc.)"
+    coupling: tight
+  - module_id: file_storage
+    usage: "Stores email attachments and notification media assets in S3-compatible blob storage"
+    coupling: loose
+  - module_id: retry_handler
+    usage: "Retries failed delivery attempts with exponential backoff across all channels"
+    coupling: tight
+  - module_id: websocket_protocol
+    usage: "Delivers real-time in-app notifications via WebSocket push to connected clients"
+    coupling: loose
+api_surface:
+  - "POST /api/v1/notifications/send"
+  - "GET  /api/v1/notifications/preferences"
+  - "PUT  /api/v1/notifications/preferences"
+  - "GET  /api/v1/notifications/history"

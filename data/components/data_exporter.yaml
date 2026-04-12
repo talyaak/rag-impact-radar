@@ -1,0 +1,30 @@
+id: data_exporter
+name: "DataExporter"
+description: >
+  Bulk and incremental data export service for compliance, migration, and
+  analytics use cases. Supports encrypted exports, schema-validated output
+  formats, and streaming exports for large datasets. Handles GDPR data
+  portability requests and scheduled compliance exports.
+team_owner: "data-team"
+criticality: medium
+modules:
+  - module_id: key_rotation
+    usage: "Encrypts export files with current encryption keys and handles key version metadata"
+    coupling: tight
+  - module_id: schema_validator
+    usage: "Validates export data against output schemas to ensure format compliance"
+    coupling: tight
+  - module_id: file_storage
+    usage: "Writes export files to S3-compatible storage with presigned download URLs"
+    coupling: tight
+  - module_id: retry_handler
+    usage: "Retries failed export chunks with backoff to handle transient storage/network failures"
+    coupling: tight
+  - module_id: job_scheduler
+    usage: "Manages scheduled export jobs (nightly compliance exports, weekly data dumps)"
+    coupling: loose
+api_surface:
+  - "POST /api/v1/exports"
+  - "GET  /api/v1/exports/{id}/status"
+  - "GET  /api/v1/exports/{id}/download"
+  - "POST /api/v1/exports/schedule"

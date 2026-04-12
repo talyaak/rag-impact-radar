@@ -1,0 +1,34 @@
+id: billing_core
+name: "BillingCore"
+description: >
+  Manages the full billing lifecycle: subscriptions, invoicing, payment
+  processing, usage metering, and revenue recognition. Integrates with
+  multiple payment providers (Stripe, Braintree, wire transfer) and handles
+  multi-currency pricing with jurisdiction-specific tax computation.
+team_owner: "payments-team"
+criticality: critical
+modules:
+  - module_id: tax_calculator
+    usage: "Computes tax amounts by jurisdiction (sales tax, VAT, GST) for invoice line items"
+    coupling: tight
+  - module_id: currency_utils
+    usage: "Multi-currency conversion using live exchange rates, locale-aware amount formatting"
+    coupling: tight
+  - module_id: db_connector
+    usage: "Manages connection pool to billing database for transaction-safe invoice writes"
+    coupling: tight
+  - module_id: cache_layer
+    usage: "Caches subscription state and pricing tier lookups to reduce database load"
+    coupling: loose
+  - module_id: metrics_collector
+    usage: "Emits billing KPIs (MRR, churn rate, payment success rate) to monitoring stack"
+    coupling: loose
+  - module_id: config_loader
+    usage: "Loads payment provider credentials and feature flags from secure vault"
+    coupling: tight
+api_surface:
+  - "POST   /api/v1/billing/subscribe"
+  - "DELETE /api/v1/billing/cancel"
+  - "GET    /api/v1/billing/invoices"
+  - "POST   /api/v1/billing/payment-method"
+  - "GET    /api/v1/billing/usage"

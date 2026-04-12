@@ -1,0 +1,103 @@
+id: professional_eu
+name: "Professional EU"
+tier: professional
+region: eu
+description: >
+  Professional EU plan with mandatory encryption and audit logging for
+  GDPR compliance. Extends Professional Global with EncryptionService
+  and AuditLogger — these are GDPR-mandated additions that make this
+  variant sensitive to security-layer changes that don't affect the
+  Global Professional tier.
+max_seats: 100
+components:
+  - component_id: auth_engine
+    features:
+      - basic_auth
+      - session_mgmt
+      - sso_saml
+      - mfa
+    config_overrides:
+      max_sessions_per_user: 10
+      mfa_enabled: true
+      session_data_residency: "eu-west-1"
+  - component_id: billing_core
+    features:
+      - subscription_mgmt
+      - invoice_generation
+      - usage_metering
+    config_overrides:
+      payment_providers: ["stripe_eu", "sepa_direct_debit"]
+      dunning_retries: 5
+      vat_handling: "reverse_charge"
+  - component_id: notification_service
+    features:
+      - email_notifications
+      - in_app_notifications
+      - webhook_delivery
+    config_overrides:
+      channels: ["email", "in_app", "webhook"]
+      daily_limit: 5000
+      email_provider_region: "eu-west-1"
+  - component_id: api_gateway
+    features:
+      - rest_api
+      - rate_limiting
+      - api_key_mgmt
+    config_overrides:
+      rate_limit_rpm: 10000
+      allowed_origins: ["*"]
+      geo_routing: "eu-only"
+  - component_id: search_service
+    features:
+      - basic_search
+      - advanced_filters
+      - saved_searches
+    config_overrides:
+      index_refresh_interval_sec: 60
+      max_results: 200
+      index_region: "eu-west-1"
+  - component_id: report_generator
+    features:
+      - standard_reports
+      - csv_export
+      - scheduled_reports
+    config_overrides:
+      max_scheduled_reports: 20
+      export_formats: ["csv", "pdf"]
+  - component_id: pricing_engine
+    features:
+      - tiered_pricing
+      - volume_discounts
+    config_overrides:
+      pricing_models: ["flat", "tiered"]
+      default_currency: "EUR"
+  - component_id: workflow_engine
+    features:
+      - basic_automations
+      - conditional_triggers
+    config_overrides:
+      max_active_workflows: 50
+      trigger_types: ["event", "schedule"]
+  # GDPR-mandated additions (not in Professional Global)
+  - component_id: encryption_service
+    features:
+      - at_rest_encryption
+      - in_transit_encryption
+      - field_level_encryption
+    config_overrides:
+      key_rotation_days: 90
+      encryption_algorithm: "AES-256-GCM"
+      data_residency: "eu-west-1"
+  - component_id: audit_logger
+    features:
+      - activity_log
+      - admin_audit
+      - compliance_audit
+    config_overrides:
+      retention_days: 730
+      tamper_proof: true
+      gdpr_right_to_erasure: true
+metadata:
+  launched: "2024-05-15"
+  compliance: ["gdpr"]
+  sla_tier: premium

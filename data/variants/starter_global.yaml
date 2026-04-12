@@ -1,0 +1,47 @@
+id: starter_global
+name: "Starter"
+tier: starter
+region: global
+description: >
+  Entry-level plan for small teams getting started with NexusSaaS.
+  Includes core productivity features: authentication, billing,
+  notifications, API access, and basic search.
+max_seats: 10
+components:
+  - component_id: auth_engine
+    features:
+      - basic_auth
+      - session_mgmt
+    config_overrides:
+      max_sessions_per_user: 3
+      mfa_enabled: false
+  - component_id: billing_core
+    features:
+      - subscription_mgmt
+      - invoice_generation
+    config_overrides:
+      payment_providers: ["stripe"]
+      dunning_retries: 3
+  - component_id: notification_service
+    features:
+      - email_notifications
+    config_overrides:
+      channels: ["email"]
+      daily_limit: 100
+  - component_id: api_gateway
+    features:
+      - rest_api
+      - rate_limiting
+    config_overrides:
+      rate_limit_rpm: 1000
+      allowed_origins: ["*"]
+  - component_id: search_service
+    features:
+      - basic_search
+    config_overrides:
+      index_refresh_interval_sec: 300
+      max_results: 50
+metadata:
+  launched: "2024-01-15"
+  compliance: []
+  sla_tier: standard

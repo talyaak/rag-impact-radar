@@ -1,0 +1,24 @@
+id: encryption_service
+name: "EncryptionService"
+description: >
+  Centralized encryption and key management service. Provides at-rest and
+  in-transit encryption, field-level encryption for sensitive data (PII, payment
+  details), and bring-your-own-key (BYOK) support. Manages encryption key
+  lifecycle including rotation, revocation, and audit trails.
+team_owner: "security-team"
+criticality: critical
+modules:
+  - module_id: crypto_utils
+    usage: "AES-256-GCM encryption/decryption, envelope encryption, and cryptographic random generation"
+    coupling: tight
+  - module_id: key_rotation
+    usage: "Automated key rotation on configurable schedules with zero-downtime re-encryption"
+    coupling: tight
+  - module_id: config_loader
+    usage: "Loads HSM/KMS connection parameters and key policies from secure vault"
+    coupling: tight
+api_surface:
+  - "POST /api/v1/encryption/encrypt"
+  - "POST /api/v1/encryption/decrypt"
+  - "POST /api/v1/encryption/keys/rotate"
+  - "GET  /api/v1/encryption/keys"

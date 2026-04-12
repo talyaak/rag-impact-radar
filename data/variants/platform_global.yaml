@@ -1,0 +1,63 @@
+id: platform_global
+name: "Platform"
+tier: platform
+region: global
+description: >
+  API-only plan for partners building on the NexusSaaS platform.
+  No end-user UI components — purely programmatic access via REST
+  and GraphQL APIs. Optimized for high-throughput API usage with
+  generous rate limits, streaming data export, and partner billing.
+max_seats: -1
+components:
+  - component_id: auth_engine
+    features:
+      - basic_auth
+      - sso_oidc
+      - api_tokens
+    config_overrides:
+      max_sessions_per_user: -1
+      api_token_limit: 100
+      mfa_enabled: false
+  - component_id: api_gateway
+    features:
+      - rest_api
+      - rate_limiting
+      - api_key_mgmt
+      - graphql_api
+      - sdk_access
+    config_overrides:
+      rate_limit_rpm: 500000
+      allowed_origins: ["configured_per_partner"]
+  - component_id: billing_core
+    features:
+      - usage_metering
+      - partner_revenue_share
+    config_overrides:
+      payment_providers: ["stripe"]
+      revenue_share_pct: 20
+  - component_id: encryption_service
+    features:
+      - at_rest_encryption
+      - in_transit_encryption
+    config_overrides:
+      key_rotation_days: 30
+      encryption_algorithm: "AES-256-GCM"
+  - component_id: data_exporter
+    features:
+      - bulk_export
+      - incremental_export
+      - streaming_export
+    config_overrides:
+      max_export_size_gb: 100
+      streaming_enabled: true
+  - component_id: pricing_engine
+    features:
+      - tiered_pricing
+      - volume_discounts
+      - partner_pricing
+    config_overrides:
+      pricing_models: ["per_api_call", "tiered"]
+metadata:
+  launched: "2025-01-10"
+  compliance: ["soc2"]
+  sla_tier: critical
