@@ -45,6 +45,11 @@ from src.rag.vector_store import VectorStore
 from src.rag.embedder import ComponentEmbedder
 from src.rag.retriever import SemanticRetriever
 from src.core.llm_client import LLMClient
+from src.ingestion.engine import IngestionEngine
+from src.gap_analysis.analyzer import GapAnalyzer, GapAnswer, AnalysisSession
+from src.gap_analysis.detector import GapDetector
+from src.recompiler.recompiler import DynamicRecompiler
+from src.recompiler.test_generator import DynamicTestGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,7 @@ _dep_graph: DependencyGraph | None = None
 _vector_store: VectorStore | None = None
 _retriever: SemanticRetriever | None = None
 _llm_client: LLMClient | None = None
+_gap_session: AnalysisSession | None = None
 
 
 @asynccontextmanager
@@ -103,11 +109,12 @@ async def _lifespan(app: FastAPI):  # noqa: ANN201, ARG001
 app = FastAPI(
     title="Impact Radar",
     description=(
-        "Change Impact Analyzer — surfaces non-obvious blast radius "
+        "Change Impact Analyzer V2 — surfaces non-obvious blast radius "
         "across product variants using graph traversal, semantic retrieval, "
-        "and LLM-powered risk synthesis."
+        "and LLM-powered risk synthesis. V2 adds universal codebase ingestion, "
+        "interactive gap analysis, and dynamic recompilation."
     ),
-    version="1.0.0",
+    version="2.0.0",
     lifespan=_lifespan,
 )
 
@@ -501,3 +508,310 @@ def _build_llm_prompt(
         "recommended mitigation steps."
     )
     return "\n".join(lines)
+
+
+# ── V2 Pydantic models ─────────────────────────────────────────────────
+
+
+class IngestRequest(BaseModel):
+    """Request body for the V2 ``/ingest`` endpoint."""
+
+    repo_path: str = Field(
+        ...,
+        description="Absolute path to the repository root to ingest.",
+    )
+    component_detection: str = Field(
+        "auto",
+        description="Detection strategy: 'auto', 'directory', or 'class'.",
+    )
+    embed: bool = Field(
+        False,
+        description="Whether to embed component descriptions into the vector store.",
+    )
+
+
+class IngestFromYamlRequest(BaseModel):
+    """Request body for ingesting from existing YAML directories."""
+
+    components_dir: str = Field(
+        ...,
+        description="Path to directory containing component YAML files.",
+    )
+    variants_dir: str | None = Field(
+        None,
+        description="Path to directory containing variant YAML files.",
+    )
+    embed: bool = Field(False, description="Whether to embed into vector store.")
+
+
+class GapAnswerRequest(BaseModel):
+    """Request body for answering gap analysis questions."""
+
+    answers: list[dict[str, Any]] = Field(
+        ...,
+        description="List of answers: [{'gap_index': int, 'answer': str, 'accept_suggestion': bool}]",
+    )
+
+
+class CompileRequest(BaseModel):
+    """Request body for the recompilation endpoint."""
+
+    embed: bool = Field(False, description="Rebuild embeddings during compilation.")
+    backup: bool = Field(True, description="Backup existing data before overwriting.")
+
+
+# ── V2 Endpoints: Onboarding ────────────────────────────────────────────
+
+
+@app.post(
+    "/api/v2/ingest",
+    description="Ingest a codebase repository and build the dependency graph.",
+    tags=["v2-onboarding"],
+)
+def ingest_codebase(request: IngestRequest) -> dict[str, Any]:
+    """Scan and parse a repository to build the initial dependency graph.
+
+    This is the first step of the V2 onboarding flow. It scans the
+    repository, extracts components and modules via AST analysis,
+    and builds the bipartite dependency graph.
+    """
+    global _dep_graph, _vector_store, _retriever  # noqa: PLW0603
+
+    engine = IngestionEngine(
+        config_path=_CONFIG_PATH,
+        component_detection=request.component_detection,
+    )
+    result = engine.ingest(
+        repo_path=request.repo_path,
+        embed=request.embed,
+        existing_store=_vector_store,
+    )
+
+    # Update shared state
+    _dep_graph = result.graph
+    if _vector_store is not None:
+        _retriever = SemanticRetriever.from_config(_vector_store, _vector_store.config)
+
+    return result.summary()
+
+
+@app.post(
+    "/api/v2/ingest/yaml",
+    description="Ingest from existing component/variant YAML directories.",
+    tags=["v2-onboarding"],
+)
+def ingest_from_yaml(request: IngestFromYamlRequest) -> dict[str, Any]:
+    """Load components and variants from existing YAML files.
+
+    This is the V1-compatible ingestion path for users who already have
+    component and variant YAML definitions.
+    """
+    global _dep_graph, _vector_store, _retriever  # noqa: PLW0603
+
+    engine = IngestionEngine(config_path=_CONFIG_PATH)
+    result = engine.ingest_yaml_directory(
+        components_dir=request.components_dir,
+        variants_dir=request.variants_dir,
+        embed=request.embed,
+        vector_store=_vector_store,
+    )
+
+    _dep_graph = result.graph
+    if _vector_store is not None:
+        _retriever = SemanticRetriever.from_config(_vector_store, _vector_store.config)
+
+    return result.summary()
+
+
+# ── V2 Endpoints: Gap Analysis ──────────────────────────────────────────
+
+
+@app.post(
+    "/api/v2/gaps/detect",
+    description="Detect structural gaps in the current dependency graph.",
+    tags=["v2-gap-analysis"],
+)
+def detect_gaps() -> dict[str, Any]:
+    """Run gap detection on the current graph and return findings.
+
+    This identifies orphan components, missing descriptions, coupling
+    ambiguity, and other issues that reduce analysis quality.
+    """
+    graph = _require_graph()
+    detector = GapDetector(graph)
+    report = detector.detect()
+    return report.summary()
+
+
+@app.post(
+    "/api/v2/gaps/start-session",
+    description="Start an interactive gap analysis session with LLM-driven suggestions.",
+    tags=["v2-gap-analysis"],
+)
+def start_gap_session() -> dict[str, Any]:
+    """Start a new gap analysis session.
+
+    The session detects gaps, generates LLM suggestions (if available),
+    and returns prioritized questions for the user.
+    """
+    global _gap_session  # noqa: PLW0603
+
+    graph = _require_graph()
+    analyzer = GapAnalyzer(
+        graph=graph,
+        llm_client=_llm_client,
+        config_path=_CONFIG_PATH,
+    )
+    _gap_session = analyzer.start_session()
+
+    return {
+        "session": _gap_session.summary(),
+        "questions": [q.to_dict() for q in _gap_session.pending_questions],
+    }
+
+
+@app.get(
+    "/api/v2/gaps/questions",
+    description="Get pending questions from the current gap analysis session.",
+    tags=["v2-gap-analysis"],
+)
+def get_gap_questions() -> dict[str, Any]:
+    """Return the current pending questions."""
+    if _gap_session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No active gap analysis session. Call POST /api/v2/gaps/start-session first.",
+        )
+
+    return {
+        "session": _gap_session.summary(),
+        "questions": [q.to_dict() for q in _gap_session.pending_questions],
+    }
+
+
+@app.post(
+    "/api/v2/gaps/answer",
+    description="Submit answers to gap analysis questions and refine the graph.",
+    tags=["v2-gap-analysis"],
+)
+def answer_gap_questions(request: GapAnswerRequest) -> dict[str, Any]:
+    """Apply user answers and re-detect remaining gaps.
+
+    Each answer resolves a gap and may trigger graph mutations
+    (adding modules, updating descriptions, refining coupling).
+    """
+    global _gap_session  # noqa: PLW0603
+
+    if _gap_session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No active gap analysis session. Call POST /api/v2/gaps/start-session first.",
+        )
+
+    graph = _require_graph()
+    analyzer = GapAnalyzer(
+        graph=graph,
+        llm_client=_llm_client,
+        config_path=_CONFIG_PATH,
+    )
+
+    answers = [
+        GapAnswer(
+            gap_index=a.get("gap_index", 0),
+            answer=a.get("answer", ""),
+            accept_suggestion=a.get("accept_suggestion", False),
+        )
+        for a in request.answers
+    ]
+
+    _gap_session = analyzer.apply_answers(_gap_session, answers)
+
+    return {
+        "session": _gap_session.summary(),
+        "questions": [q.to_dict() for q in _gap_session.pending_questions],
+    }
+
+
+# ── V2 Endpoints: Recompilation ─────────────────────────────────────────
+
+
+@app.post(
+    "/api/v2/compile",
+    description="Recompile the system for deployment with the curated graph.",
+    tags=["v2-recompilation"],
+)
+def compile_for_deployment(request: CompileRequest) -> dict[str, Any]:
+    """Persist the curated graph, rebuild embeddings, and generate a deployment manifest.
+
+    This is the final step of the V2 onboarding flow. It exports all
+    component/variant YAML files, rebuilds the vector store, updates
+    the config, and generates a deployment manifest.
+    """
+    graph = _require_graph()
+
+    recompiler = DynamicRecompiler(
+        graph=graph,
+        config_path=_CONFIG_PATH,
+    )
+
+    gap_report = None
+    if _gap_session is not None:
+        gap_report = _gap_session.gap_report
+
+    result = recompiler.compile(
+        vector_store=_vector_store if request.embed else None,
+        gap_report=gap_report,
+        backup=request.backup,
+    )
+
+    return result.summary()
+
+
+@app.post(
+    "/api/v2/generate-tests",
+    description="Generate validation test cases from the curated dependency graph.",
+    tags=["v2-validation"],
+)
+def generate_tests() -> dict[str, Any]:
+    """Generate grounded pytest test cases from the current graph.
+
+    All generated tests are strictly based on the bipartite graph — no
+    hallucinated components or fabricated relationships.
+    """
+    graph = _require_graph()
+    generator = DynamicTestGenerator(graph)
+    suite = generator.generate()
+
+    # Write tests to file
+    test_path = _PROJECT_ROOT / "tests" / "test_generated_impacts.py"
+    test_path.write_text(suite.to_pytest_file())
+
+    return {
+        "tests_generated": len(suite.tests),
+        "test_file": str(test_path),
+        "summary": suite.summary,
+    }
+
+
+@app.get(
+    "/api/v2/status",
+    description="Get the current V2 onboarding status.",
+    tags=["v2-onboarding"],
+)
+def v2_status() -> dict[str, Any]:
+    """Return the current state of the V2 onboarding pipeline."""
+    status: dict[str, Any] = {
+        "version": "2.0.0",
+        "graph_loaded": _dep_graph is not None,
+        "vector_store_loaded": _vector_store is not None,
+        "llm_available": _llm_client is not None,
+        "gap_session_active": _gap_session is not None,
+    }
+
+    if _dep_graph is not None:
+        status["graph_summary"] = _dep_graph.summary()
+
+    if _gap_session is not None:
+        status["gap_session"] = _gap_session.summary()
+
+    return status

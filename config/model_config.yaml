@@ -54,3 +54,27 @@ analysis:
     medium: 1.0
     low: 0.5
   variant_impact_threshold: 0.3  # Minimum score to flag a variant as affected
+
+# ── V2: Ingestion Engine Settings ──────────────────────────────────────
+ingestion:
+  component_detection: "auto"    # auto | directory | class
+  min_class_methods: 2           # Minimum methods for a class to be a component
+  max_file_size_bytes: 5000000   # Skip files larger than 5MB
+  ignore_patterns:               # Directories to skip during scanning
+    - ".git"
+    - "__pycache__"
+    - "node_modules"
+    - ".venv"
+    - "venv"
+    - "chroma_db"
+
+# ── V2: Gap Analysis Settings ─────────────────────────────────────────
+gap_analysis:
+  max_questions_per_round: 10    # Questions per interactive round
+  auto_resolve_low_severity: true # Auto-resolve LOW gaps with defaults
+  completeness_threshold: 0.8    # Target completeness before marking done
+
+# ── V2: Recompilation Settings ────────────────────────────────────────
+recompilation:
+  backup_before_export: true     # Backup existing data before recompiling
+  auto_adjust_depth: true        # Adjust traversal depth based on graph size
