@@ -54,3 +54,82 @@ analysis:
     medium: 1.0
     low: 0.5
   variant_impact_threshold: 0.3  # Minimum score to flag a variant as affected
+
+# ── V2: Ingestion Engine Settings ──────────────────────────────────────
+ingestion:
+  component_detection: "auto"    # auto | directory | class
+  min_class_methods: 2           # Minimum methods for a class to be a component
+  max_file_size_bytes: 5000000   # Skip files larger than 5MB
+  ignore_patterns:               # Directories to skip during scanning
+    - ".git"
+    - "__pycache__"
+    - "node_modules"
+    - ".venv"
+    - "venv"
+    - "chroma_db"
+
+# ── V2: Gap Analysis Settings ─────────────────────────────────────────
+gap_analysis:
+  max_questions_per_round: 10    # Questions per interactive round
+  auto_resolve_low_severity: true # Auto-resolve LOW gaps with defaults
+  completeness_threshold: 0.8    # Target completeness before marking done
+
+# ── V2: Recompilation Settings ────────────────────────────────────────
+recompilation:
+  backup_before_export: true     # Backup existing data before recompiling
+  auto_adjust_depth: true        # Adjust traversal depth based on graph size
+
+# ── V2: Enterprise Security & Privacy ─────────────────────────────────
+#
+# CRITICAL: These settings govern how proprietary code and data are
+# protected when communicating with external LLM/embedding APIs.
+# Enterprise deployments MUST review and configure this section.
+#
+security:
+  # Zero data retention: instruct API providers not to store/retain data
+  zero_data_retention: true
+
+  privacy:
+    # LOCAL-ONLY MODE: When true, ALL external API calls are blocked.
+    # The system uses Chroma's built-in Sentence Transformers for
+    # embeddings (local, no network) and skips LLM generation entirely.
+    # Enable this for maximum security when no data may leave the network.
+    local_only_mode: false
+
+    # Redaction level for content sent to external APIs:
+    #   strict   — Redact secrets, PII, file paths, IPs (enterprise default)
+    #   moderate — Redact secrets and PII only
+    #   minimal  — Redact only obvious secrets (API keys, tokens)
+    redaction_level: "strict"
+
+    # Maximum content sizes (prevent accidental bulk exfiltration)
+    max_prompt_length: 50000       # Max chars per LLM prompt
+    max_embedding_length: 10000    # Max chars per embedding text
+    max_batch_size: 100            # Max texts per embedding batch
+
+    # Block raw source code from being sent to LLMs
+    block_source_code: true
+
+    # Blocked patterns: content matching these strings is NEVER sent externally.
+    # Add project-specific terms, internal hostnames, or classified codenames.
+    blocked_patterns: []
+    # Example:
+    #   - "internal.corp.example.com"
+    #   - "PROJECT_CLASSIFIED"
+    #   - "secret-service-name"
+
+    # Allow file paths in LLM prompts (default: false for strict mode)
+    allow_file_paths: false
+
+    # Allow IP addresses in LLM prompts (default: false for strict mode)
+    allow_ip_addresses: false
+
+    # Audit log path (append-only JSONL file tracking every external API call)
+    audit_log_path: "privacy_audit.jsonl"
+
+    # Custom redaction patterns (enterprise can add domain-specific patterns)
+    # Each entry: {name: "label", pattern: "regex_pattern"}
+    custom_redaction_patterns: []
+    # Example:
+    #   - name: "internal_hostname"
+    #     pattern: "[a-z]+-[a-z]+-\\d+\\.internal\\.corp\\.com"
