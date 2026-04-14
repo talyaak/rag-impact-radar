@@ -26,6 +26,9 @@ env/
 # Vector store persistence
 chroma_db/
 
+# Privacy audit log (runtime artifact)
+privacy_audit.jsonl
+
 # Testing
 .pytest_cache/
 htmlcov/
