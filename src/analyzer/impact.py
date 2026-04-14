@@ -51,6 +51,7 @@ from src.graph.traverser import (
 )
 from src.rag.retriever import ComponentMatch, SemanticRetriever
 from src.core.llm_client import LLMClient
+from src.core.privacy_guard import PrivacyGuard
 
 
 # ── Data Classes ──────────────────────────────────────────────────────────
@@ -168,11 +169,13 @@ class ImpactAnalyzer:
         retriever: SemanticRetriever | None = None,
         llm_client: LLMClient | None = None,
         config_path: str | Path = "config/model_config.yaml",
+        privacy_guard: PrivacyGuard | None = None,
     ) -> None:
         self._graph = dep_graph
         self._traverser = traverser
         self._retriever = retriever
         self._llm = llm_client
+        self._privacy_guard = privacy_guard
         self._config = self._load_config(config_path)
 
         # Scoring weights from config
@@ -471,12 +474,21 @@ class ImpactAnalyzer:
                 changed_components, graph_result, semantic_matches, vr
             )
             try:
-                explanation = self._llm.generate(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    temperature=0.2,
-                    max_tokens=512,
-                )
+                if self._privacy_guard is not None:
+                    explanation = self._privacy_guard.guarded_generate(
+                        self._llm,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        temperature=0.2,
+                        max_tokens=512,
+                    )
+                else:
+                    explanation = self._llm.generate(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        temperature=0.2,
+                        max_tokens=512,
+                    )
                 vr.llm_explanation = explanation.strip()
             except Exception:
                 vr.llm_explanation = ""

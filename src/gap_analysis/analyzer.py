@@ -22,6 +22,7 @@ import yaml
 
 from src.graph.builder import DependencyGraph
 from src.core.llm_client import LLMClient
+from src.core.privacy_guard import PrivacyGuard
 from src.gap_analysis.detector import GapDetector, GapItem, GapReport, GapSeverity, GapType
 from src.ingestion.parser import ParseResult
 
@@ -111,10 +112,12 @@ class GapAnalyzer:
         parse_result: ParseResult | None = None,
         config_path: str | Path = "config/model_config.yaml",
         completeness_threshold: float = 0.8,
+        privacy_guard: PrivacyGuard | None = None,
     ) -> None:
         self._graph = graph
         self._llm = llm_client
         self._parse_result = parse_result
+        self._privacy_guard = privacy_guard
         self._config = self._load_config(config_path)
         self._threshold = completeness_threshold
 
@@ -248,12 +251,21 @@ class GapAnalyzer:
         for gap in unresolved:
             prompt = self._build_suggestion_prompt(gap, graph_context)
             try:
-                suggestion = self._llm.generate(
-                    prompt=prompt,
-                    system_prompt=_GAP_SYSTEM_PROMPT,
-                    temperature=0.2,
-                    max_tokens=256,
-                )
+                if self._privacy_guard is not None:
+                    suggestion = self._privacy_guard.guarded_generate(
+                        self._llm,
+                        prompt=prompt,
+                        system_prompt=_GAP_SYSTEM_PROMPT,
+                        temperature=0.2,
+                        max_tokens=256,
+                    )
+                else:
+                    suggestion = self._llm.generate(
+                        prompt=prompt,
+                        system_prompt=_GAP_SYSTEM_PROMPT,
+                        temperature=0.2,
+                        max_tokens=256,
+                    )
                 gap.suggestion = suggestion.strip()
             except Exception:
                 logger.warning(

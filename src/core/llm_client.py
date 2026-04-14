@@ -73,9 +73,23 @@ class LLMClient:
         self._max_retries = llm_config.get("max_retries", 3)
         self._retry_base_delay = llm_config.get("retry_base_delay", 1.0)
 
+        # ── Enterprise Security: Zero-Training Headers ──
+        # OpenAI's API data is not used for training by default, but
+        # enterprise deployments require explicit belt-and-suspenders.
+        # The default_headers are sent with EVERY API request.
+        security_config = self._config.get("security", {})
+        self._zero_training = security_config.get("zero_data_retention", True)
+
+        default_headers = {}
+        if self._zero_training:
+            # X-No-Store: signal that content must not be persisted
+            # beyond the immediate request-response cycle.
+            default_headers["X-No-Store"] = "true"
+
         self._client = OpenAI(
             api_key=api_key,
             timeout=self._timeout,
+            default_headers=default_headers if default_headers else None,
         )
 
     @staticmethod

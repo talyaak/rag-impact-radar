@@ -45,6 +45,7 @@ from src.rag.vector_store import VectorStore
 from src.rag.embedder import ComponentEmbedder
 from src.rag.retriever import SemanticRetriever
 from src.core.llm_client import LLMClient
+from src.core.privacy_guard import PrivacyGuard
 from src.ingestion.engine import IngestionEngine
 from src.gap_analysis.analyzer import GapAnalyzer, GapAnswer, AnalysisSession
 from src.gap_analysis.detector import GapDetector
@@ -66,6 +67,7 @@ _dep_graph: DependencyGraph | None = None
 _vector_store: VectorStore | None = None
 _retriever: SemanticRetriever | None = None
 _llm_client: LLMClient | None = None
+_privacy_guard: PrivacyGuard | None = None
 _gap_session: AnalysisSession | None = None
 
 
@@ -80,7 +82,18 @@ async def _lifespan(app: FastAPI):  # noqa: ANN201, ARG001
     lifespan context manager we guarantee they happen exactly once and are
     available to every request handler via module-level references.
     """
-    global _dep_graph, _vector_store, _retriever, _llm_client  # noqa: PLW0603
+    global _dep_graph, _vector_store, _retriever, _llm_client, _privacy_guard  # noqa: PLW0603
+
+    # ── Initialize Privacy Guard (before any external API calls) ────
+    logger.info("Initializing privacy guard")
+    _privacy_guard = PrivacyGuard.from_config(_CONFIG_PATH)
+    if _privacy_guard.is_local_only:
+        logger.info("Privacy guard: LOCAL-ONLY mode — all external API calls blocked")
+    else:
+        logger.info(
+            "Privacy guard: redaction_level=%s",
+            _privacy_guard.config.redaction_level.value,
+        )
 
     logger.info("Building dependency graph from %s / %s", _COMPONENTS_DIR, _VARIANTS_DIR)
     _dep_graph = DependencyGraph(_COMPONENTS_DIR, _VARIANTS_DIR)
@@ -384,15 +397,23 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
             prompt_context = _build_llm_prompt(
                 request.changed_components, impact_result, semantic_matches
             )
-            llm_narrative = _llm_client.generate(
-                prompt=prompt_context,
-                system_prompt=(
-                    "You are a senior platform engineer assessing change-impact risk. "
-                    "Explain the blast radius concisely, highlight non-obvious risks, "
-                    "and suggest mitigation steps.  Ground every claim in the provided "
-                    "evidence — do not speculate."
-                ),
+            system_prompt = (
+                "You are a senior platform engineer assessing change-impact risk. "
+                "Explain the blast radius concisely, highlight non-obvious risks, "
+                "and suggest mitigation steps.  Ground every claim in the provided "
+                "evidence — do not speculate."
             )
+            if _privacy_guard is not None:
+                llm_narrative = _privacy_guard.guarded_generate(
+                    _llm_client,
+                    prompt=prompt_context,
+                    system_prompt=system_prompt,
+                )
+            else:
+                llm_narrative = _llm_client.generate(
+                    prompt=prompt_context,
+                    system_prompt=system_prompt,
+                )
             llm_used = True
         except Exception:
             logger.warning(
@@ -661,6 +682,7 @@ def start_gap_session() -> dict[str, Any]:
         graph=graph,
         llm_client=_llm_client,
         config_path=_CONFIG_PATH,
+        privacy_guard=_privacy_guard,
     )
     _gap_session = analyzer.start_session()
 
@@ -713,6 +735,7 @@ def answer_gap_questions(request: GapAnswerRequest) -> dict[str, Any]:
         graph=graph,
         llm_client=_llm_client,
         config_path=_CONFIG_PATH,
+        privacy_guard=_privacy_guard,
     )
 
     answers = [
@@ -814,4 +837,55 @@ def v2_status() -> dict[str, Any]:
     if _gap_session is not None:
         status["gap_session"] = _gap_session.summary()
 
+    if _privacy_guard is not None:
+        status["privacy"] = _privacy_guard.get_audit_summary()
+
     return status
+
+
+@app.get(
+    "/api/v2/privacy/audit",
+    description="View the privacy audit log of all external API calls.",
+    tags=["v2-security"],
+)
+def privacy_audit() -> dict[str, Any]:
+    """Return the privacy audit log and summary.
+
+    The audit log records every external API call with:
+    - Content hash (never raw content)
+    - Redaction count and categories
+    - Data classification level
+    - Whether the call was blocked
+
+    This endpoint is essential for enterprise compliance reporting.
+    """
+    if _privacy_guard is None:
+        return {"audit_log": [], "summary": {}}
+
+    return {
+        "summary": _privacy_guard.get_audit_summary(),
+        "audit_log": _privacy_guard.get_audit_log(),
+    }
+
+
+@app.get(
+    "/api/v2/privacy/status",
+    description="Get the current privacy guard configuration and status.",
+    tags=["v2-security"],
+)
+def privacy_status() -> dict[str, Any]:
+    """Return the privacy guard configuration."""
+    if _privacy_guard is None:
+        return {"enabled": False}
+
+    config = _privacy_guard.config
+    return {
+        "enabled": True,
+        "local_only_mode": config.local_only_mode,
+        "redaction_level": config.redaction_level.value,
+        "block_source_code": config.block_source_code,
+        "max_prompt_length": config.max_prompt_length,
+        "max_embedding_length": config.max_embedding_length,
+        "blocked_patterns_count": len(config.blocked_patterns),
+        "audit_summary": _privacy_guard.get_audit_summary(),
+    }
