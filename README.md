@@ -184,7 +184,7 @@ Every arrow that touches an external LLM or embedding API goes through
 `PrivacyGuard`, which redacts secrets/PII, enforces size and deny-list
 guardrails, and appends a tamper-evident entry to `privacy_audit.jsonl`.
 
-See [Chapter 7: The V2 Evolution](docs/07-v2-evolution.txt) for the full
+See [Chapter 7: The V2 Evolution](docs/07-v2-evolution.md) for the full
 architectural walkthrough and the design tradeoffs behind each subsystem.
 
 ---
@@ -360,7 +360,7 @@ This project includes a 7-chapter educational curriculum in [`docs/`](docs/READM
 | [4. Retrieval Strategies](docs/04-retrieval-strategies.md) | Hybrid retrieval and two-stage search |
 | [5. Grounded Generation](docs/05-grounded-generation.md) | Prompt engineering and hallucination prevention |
 | [6. Architecture](docs/06-architecture-walkthrough.md) | Full pipeline walkthrough |
-| [7. V2 Evolution](docs/07-v2-evolution.txt) | From seeded demo to self-adapting system: ingestion, gap analysis, recompilation, and the privacy layer |
+| [7. V2 Evolution](docs/07-v2-evolution.md) | From seeded demo to self-adapting system: ingestion, gap analysis, recompilation, and the privacy layer |
 
 ---
 

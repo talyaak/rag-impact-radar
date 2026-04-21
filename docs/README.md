@@ -33,7 +33,7 @@ diagrams and code pointers — no setup required to learn the concepts.
 | 4 | [Retrieval Strategies](04-retrieval-strategies.md) | ~20 min | Naive vs graph vs hybrid retrieval, two-stage pattern, metadata filtering, aggregation | `src/rag/retriever.py`, `src/rag/vector_store.py`, `src/graph/traverser.py` |
 | 5 | [Grounded Generation](05-grounded-generation.md) | ~20 min | Prompt engineering for RAG, hallucination prevention, prompt templates, evidence citation | `src/core/llm_client.py` |
 | 6 | [Architecture Walkthrough](06-architecture-walkthrough.md) | ~20 min | Full pipeline data flow, configuration, testing strategy, end-to-end trace | `src/analyzer/`, `src/api/`, `config/` |
-| 7 | [V2 Evolution](07-v2-evolution.txt) | ~30 min | From static demo to self-adapting product: codebase ingestion, AST parsing, interactive gap analysis, dynamic recompilation, auto-generated tests, and the privacy/audit layer | `src/ingestion/`, `src/gap_analysis/`, `src/recompiler/`, `src/core/sanitizer.py`, `src/core/privacy_guard.py` |
+| 7 | [V2 Evolution](07-v2-evolution.md) | ~30 min | From static demo to self-adapting product: codebase ingestion, AST parsing, interactive gap analysis, dynamic recompilation, auto-generated tests, and the privacy/audit layer | `src/ingestion/`, `src/gap_analysis/`, `src/recompiler/`, `src/core/sanitizer.py`, `src/core/privacy_guard.py` |
 
 **Total reading time: approximately 2.5 hours.**
 
