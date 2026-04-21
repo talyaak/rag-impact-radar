@@ -47,6 +47,7 @@ from src.rag.retriever import SemanticRetriever
 from src.core.llm_client import LLMClient
 from src.core.privacy_guard import PrivacyGuard
 from src.ingestion.engine import IngestionEngine
+from src.ingestion.estimator import CostEstimator
 from src.gap_analysis.analyzer import GapAnalyzer, GapAnswer, AnalysisSession
 from src.gap_analysis.detector import GapDetector
 from src.recompiler.recompiler import DynamicRecompiler
@@ -551,6 +552,23 @@ class IngestRequest(BaseModel):
     )
 
 
+class EstimateRequest(BaseModel):
+    """Request body for dry-run cost estimation."""
+
+    repo_path: str = Field(
+        ...,
+        description="Absolute path to the repository to project costs for.",
+    )
+    include_embeddings: bool = Field(
+        True,
+        description="Project embedding cost (skips if you only care about gap costs).",
+    )
+    include_gap_suggestions: bool = Field(
+        True,
+        description="Project LLM gap-suggestion cost.",
+    )
+
+
 class IngestFromYamlRequest(BaseModel):
     """Request body for ingesting from existing YAML directories."""
 
@@ -642,6 +660,33 @@ def ingest_from_yaml(request: IngestFromYamlRequest) -> dict[str, Any]:
         _retriever = SemanticRetriever.from_config(_vector_store, _vector_store.config)
 
     return result.summary()
+
+
+@app.post(
+    "/api/v2/ingest/estimate",
+    description="Dry-run: project token counts and cost without hitting any external API.",
+    tags=["v2-onboarding"],
+)
+def estimate_ingest_cost(request: EstimateRequest) -> dict[str, Any]:
+    """Project what ingesting this repo would cost before paying for it.
+
+    Runs the free stages (scan + parse + gap detection) and multiplies
+    counts by the prices configured under `pricing:` in model_config.yaml.
+    The embedding cache is consulted so cache hits are excluded from the
+    projected cost. Makes no external API calls.
+    """
+    import yaml
+    with open(_CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f) or {}
+
+    cache = _llm_client.embedding_cache if _llm_client is not None else None
+    estimator = CostEstimator(config=cfg, embedding_cache=cache)
+    projection = estimator.estimate(
+        repo_path=request.repo_path,
+        include_embeddings=request.include_embeddings,
+        include_gap_suggestions=request.include_gap_suggestions,
+    )
+    return projection.to_dict()
 
 
 # ── V2 Endpoints: Gap Analysis ──────────────────────────────────────────

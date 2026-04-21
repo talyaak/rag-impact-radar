@@ -353,6 +353,103 @@ blocked.
 
 ---
 
+## Pillar 5: Cost Control Guardrails
+
+Onboarding a multi-repository monorepo can produce thousands of embeddable
+documents and hundreds of detected gaps. Without guardrails, the first
+`POST /api/v2/ingest` would be billed per-document and per-gap. V2 adds
+three layers so the bill is predictable and, where possible, zero.
+
+### Content-hash embedding cache (`src/rag/embedding_cache.py`)
+
+`EmbeddingCache` is a persistent `SHA256(model + text) → vector` map.
+`LLMClient.get_embeddings_batch()` pre-scans the batch for cache hits and
+dispatches only the misses to the API. Cache keys include the model name,
+so switching `text-embedding-3-small` → `-3-large` does not return stale
+vectors. The cache persists as JSON under `data/cache/embeddings.json`
+and uses an `OrderedDict` with LRU eviction past `cache_max_entries`.
+
+Config (`config/model_config.yaml` → `embedding:`):
+
+```yaml
+cache_enabled: true
+cache_path: "data/cache/embeddings.json"
+cache_max_entries: 100000
+```
+
+The practical effect: re-ingesting the same repo after refinement is free
+for any description that did not change.
+
+### Batched gap suggestions (`src/gap_analysis/analyzer.py`)
+
+Under the hood the analyzer previously made one LLM call per gap. `V2`
+packs up to `suggestion_batch_size` gaps into a single prompt and asks
+for a JSON array of suggestions. Parse failures fall back to the
+per-gap path, so the feature is strictly additive.
+
+Config (`config/model_config.yaml` → `gap_analysis:`):
+
+```yaml
+suggestion_batch_size: 10      # 1 reproduces legacy behavior
+enable_llm_suggestions: true   # false skips the LLM entirely
+```
+
+Setting `enable_llm_suggestions: false` makes `GapAnalyzer.start_session()`
+produce questions straight from the detector — zero LLM cost, useful for
+fast iteration and for local-only deployments.
+
+### Dry-run cost estimator (`src/ingestion/estimator.py`)
+
+`CostEstimator` runs the free stages (scan, parse, graph build, gap
+detection) against a repository path, counts the documents a
+`ComponentEmbedder` would produce, subtracts cache hits, and multiplies
+by the per-million-token prices configured under `pricing:`. No
+embedding or LLM call is made. The API surface is
+`POST /api/v2/ingest/estimate`:
+
+```bash
+curl -X POST http://localhost:8000/api/v2/ingest/estimate \
+     -H 'Content-Type: application/json' \
+     -d '{"repo_path": "/path/to/monorepo"}'
+```
+
+The response is a projection with `components_found`, per-stage token
+counts, cache-hit projections, and a `total_cost_usd`. You read the
+projection before deciding to run the paid pipeline.
+
+Config (`config/model_config.yaml` → new `pricing:` block):
+
+```yaml
+pricing:
+  embedding_per_million_tokens: 0.02
+  llm_input_per_million_tokens: 2.50
+  llm_output_per_million_tokens: 10.00
+  chars_per_token: 4
+```
+
+### How the three stack up
+
+```
+  +----------------------------+
+  | 1. Estimate (free)         |  POST /api/v2/ingest/estimate
+  | → projected $ for this run |
+  +-------------+--------------+
+                |
+                v
+  +-------------+--------------+
+  | 2. Embedding cache         |  skip $ for docs seen before
+  | hits served at $0          |
+  +-------------+--------------+
+                |
+                v
+  +-------------+--------------+
+  | 3. Batched gap suggestions |  N gaps → 1 LLM call
+  | or disable LLM entirely    |
+  +----------------------------+
+```
+
+---
+
 ## What Stayed Exactly the Same
 
 V2 is an addition, not a rewrite. None of the V1 modules were modified to
@@ -389,6 +486,9 @@ generation entirely.
 | **Privacy guard** | `PrivacyGuard` — the single gateway every external API call must pass through. Sanitizes, classifies, enforces guardrails, audits. |
 | **Audit entry** | A single append-only line in `privacy_audit.jsonl` recording one outbound API call: hash (not content), redaction count, classification, block status. |
 | **Local-only mode** | A `PrivacyGuard` setting that blocks all outbound calls and falls back to local embeddings; lets the whole pipeline run with no external dependencies. |
+| **Embedding cache** | `EmbeddingCache` — persistent `SHA256(model + text) → vector` map. Cache hits serve embeddings locally at $0. Stored under `data/cache/embeddings.json`. |
+| **Batched suggestions** | Packing N gaps into one LLM call via `suggestion_batch_size`, returning a JSON array of suggestions. Falls back to per-gap on parse failure. |
+| **Cost projection** | Output of `POST /api/v2/ingest/estimate`: token counts, cache-hit projection, `$` total. No external API calls — safe to run before deciding to ingest. |
 
 ---
 

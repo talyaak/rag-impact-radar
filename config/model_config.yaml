@@ -20,6 +20,12 @@ embedding:
   model: "text-embedding-3-small"
   dimensions: 1536
   batch_size: 100
+  # Content-hash cache: skip re-embedding text whose SHA-256 is already cached.
+  # When enabled, the embedder hashes each document body before dispatching
+  # to the API; cache hits are served locally for $0.
+  cache_enabled: true
+  cache_path: "data/cache/embeddings.json"
+  cache_max_entries: 100000       # Evict oldest entries past this cap
 
 vector_store:
   provider: "chroma"
@@ -73,11 +79,28 @@ gap_analysis:
   max_questions_per_round: 10    # Questions per interactive round
   auto_resolve_low_severity: true # Auto-resolve LOW gaps with defaults
   completeness_threshold: 0.8    # Target completeness before marking done
+  # Batched suggestion mode: pack multiple gaps into a single LLM call.
+  # suggestion_batch_size=1 reproduces the legacy one-call-per-gap behavior.
+  # suggestion_batch_size=10 reduces LLM calls by ~10x during onboarding.
+  suggestion_batch_size: 10
+  enable_llm_suggestions: true   # If false, skip LLM entirely (graph-only gaps)
 
 # ── V2: Recompilation Settings ────────────────────────────────────────
 recompilation:
   backup_before_export: true     # Backup existing data before recompiling
   auto_adjust_depth: true        # Adjust traversal depth based on graph size
+
+# ── V2: Cost Estimation ───────────────────────────────────────────────
+# Prices in USD per 1M tokens. Used by POST /api/v2/ingest/estimate to
+# project cost before running the paid pipeline. Update when provider
+# prices change. These are projection numbers only — not billed here.
+pricing:
+  embedding_per_million_tokens: 0.02     # text-embedding-3-small
+  llm_input_per_million_tokens: 2.50     # gpt-4o
+  llm_output_per_million_tokens: 10.00   # gpt-4o
+  # Heuristic: ~4 chars per token is the standard approximation for
+  # OpenAI's BPE tokenizers on English text.
+  chars_per_token: 4
 
 # ── V2: Enterprise Security & Privacy ─────────────────────────────────
 #

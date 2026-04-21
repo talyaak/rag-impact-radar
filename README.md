@@ -184,6 +184,18 @@ Every arrow that touches an external LLM or embedding API goes through
 `PrivacyGuard`, which redacts secrets/PII, enforces size and deny-list
 guardrails, and appends a tamper-evident entry to `privacy_audit.jsonl`.
 
+**Cost control guardrails.** Onboarding a multi-repo monorepo is cheap by
+default because V2 ships three layers of cost controls:
+
+- **Content-hash embedding cache** (`src/rag/embedding_cache.py`) — persistent
+  `SHA256(model + text) → vector` map; re-ingesting identical descriptions
+  is served locally at $0.
+- **Batched gap suggestions** — `suggestion_batch_size` packs N gaps into
+  one LLM call; `enable_llm_suggestions: false` skips the LLM entirely.
+- **Dry-run estimator** — `POST /api/v2/ingest/estimate` projects token
+  counts and USD cost with zero external calls, so you see the bill before
+  paying it.
+
 See [Chapter 7: The V2 Evolution](docs/07-v2-evolution.md) for the full
 architectural walkthrough and the design tradeoffs behind each subsystem.
 
@@ -210,6 +222,7 @@ architectural walkthrough and the design tradeoffs behind each subsystem.
 |--------|----------|-------------|
 | POST | `/api/v2/ingest` | Scan and parse a repository into a dependency graph |
 | POST | `/api/v2/ingest/yaml` | V1-compatible ingestion from existing YAML directories |
+| POST | `/api/v2/ingest/estimate` | Dry-run cost projection (no external API calls) |
 | POST | `/api/v2/gaps/detect` | Run structural gap detection on the current graph |
 | POST | `/api/v2/gaps/start-session` | Begin an interactive gap-analysis session with LLM suggestions |
 | GET  | `/api/v2/gaps/questions` | Get pending questions from the active session |
@@ -284,14 +297,16 @@ impact-radar/
 │   ├── rag/
 │   │   ├── embedder.py         # Converts YAML → embeddable documents
 │   │   ├── retriever.py        # Two-stage semantic search with aggregation
-│   │   └── vector_store.py     # Chroma wrapper
+│   │   ├── vector_store.py     # Chroma wrapper
+│   │   └── embedding_cache.py  # (V2) Persistent SHA-256 → vector cache
 │   ├── analyzer/
 │   │   ├── impact.py           # Orchestrates graph + RAG + LLM
 │   │   └── reporter.py         # Formats risk reports (terminal/JSON/MD)
 │   ├── ingestion/              # (V2) Universal codebase ingestion
 │   │   ├── scanner.py          #        Discover + classify files
 │   │   ├── parser.py           #        AST extraction of components/modules
-│   │   └── engine.py           #        Scan → parse → graph → embed pipeline
+│   │   ├── engine.py           #        Scan → parse → graph → embed pipeline
+│   │   └── estimator.py        #        Dry-run cost projection (no API calls)
 │   ├── gap_analysis/           # (V2) Interactive graph refinement
 │   │   ├── detector.py         #        Find orphans, ambiguities, missing links
 │   │   └── analyzer.py         #        LLM-driven question/answer loop
@@ -314,6 +329,7 @@ impact-radar/
 │   ├── test_recompiler.py      # (V2) Compilation + test generator tests
 │   ├── test_api_v2.py          # (V2) V2 endpoint tests
 │   ├── test_security.py        # (V2) Sanitizer + privacy guard tests
+│   ├── test_cost_controls.py   # (V2) Cache + batched suggestions + estimator
 │   └── test_generated_impacts.py # (V2) Self-generated validation suite
 ├── docs/                       # Zero-to-hero RAG curriculum (7 chapters)
 ├── Dockerfile
