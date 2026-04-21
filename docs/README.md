@@ -1,10 +1,15 @@
 # RAG Impact Radar — Zero to Hero Curriculum
 
-This six-chapter guide teaches Retrieval-Augmented Generation (RAG) from
+This seven-chapter guide teaches Retrieval-Augmented Generation (RAG) from
 scratch by building a real tool: **Impact Radar**, a Change Impact Analyzer
 that combines vector search with knowledge graphs to answer questions like
 "What breaks if I change AuthEngine?" You do not need prior ML or NLP
 experience — just daily familiarity with AI assistants like ChatGPT or Claude.
+
+Chapters 1–6 build the V1 system from first principles. Chapter 7 shows how
+that system evolved into V2 — a self-adapting product that ingests any
+codebase, refines its own knowledge graph through an LLM-driven dialog, and
+enforces an enterprise privacy layer on every external API call.
 
 ---
 
@@ -28,15 +33,16 @@ diagrams and code pointers — no setup required to learn the concepts.
 | 4 | [Retrieval Strategies](04-retrieval-strategies.md) | ~20 min | Naive vs graph vs hybrid retrieval, two-stage pattern, metadata filtering, aggregation | `src/rag/retriever.py`, `src/rag/vector_store.py`, `src/graph/traverser.py` |
 | 5 | [Grounded Generation](05-grounded-generation.md) | ~20 min | Prompt engineering for RAG, hallucination prevention, prompt templates, evidence citation | `src/core/llm_client.py` |
 | 6 | [Architecture Walkthrough](06-architecture-walkthrough.md) | ~20 min | Full pipeline data flow, configuration, testing strategy, end-to-end trace | `src/analyzer/`, `src/api/`, `config/` |
+| 7 | [V2 Evolution](07-v2-evolution.txt) | ~30 min | From static demo to self-adapting product: codebase ingestion, AST parsing, interactive gap analysis, dynamic recompilation, auto-generated tests, and the privacy/audit layer | `src/ingestion/`, `src/gap_analysis/`, `src/recompiler/`, `src/core/sanitizer.py`, `src/core/privacy_guard.py` |
 
-**Total reading time: approximately 2 hours.**
+**Total reading time: approximately 2.5 hours.**
 
 ---
 
 ## Suggested Reading Order
 
 The chapters are sequential — each one builds on the previous. Follow them
-in order from 1 through 6.
+in order from 1 through 7.
 
 ```
 Chapter 1  establishes vocabulary and mental models used everywhere else.
@@ -45,6 +51,7 @@ Chapter 3  introduces the structural layer (graphs) that Chapter 4 depends on.
 Chapter 4  combines both layers into a retrieval pipeline.
 Chapter 5  shows how retrieved context becomes a grounded LLM response.
 Chapter 6  ties every piece together into the running application.
+Chapter 7  shows how the running application became self-adapting (V2).
 ```
 
 ---
@@ -86,6 +93,12 @@ Chapter 6  ties every piece together into the running application.
                   +-----------------------+
                   |  6. Architecture      |
                   |  Full pipeline        |
+                  +-----------+-----------+
+                              |
+                              v
+                  +-----------------------+
+                  |  7. V2 Evolution      |
+                  |  Self-adapting system |
                   +-----------------------+
                               |
                               v
@@ -129,6 +142,11 @@ docs/                           src/
 06-architecture-walkthrough --> src/analyzer/  (orchestration)
                                 src/api/       (HTTP layer)
                                 config/        (runtime settings)
+07-v2-evolution            -->  src/ingestion/      (scan + AST parse)
+                                src/gap_analysis/   (detect + interactive refine)
+                                src/recompiler/     (persist + generate tests)
+                                src/core/sanitizer.py
+                                src/core/privacy_guard.py
 ```
 
 When a chapter references a concept, it points to the exact file where that
