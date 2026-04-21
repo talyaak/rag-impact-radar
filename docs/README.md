@@ -1,6 +1,6 @@
 # RAG Impact Radar — Zero to Hero Curriculum
 
-This six-chapter guide teaches Retrieval-Augmented Generation (RAG) from
+This seven-chapter guide teaches Retrieval-Augmented Generation (RAG) from
 scratch by building a real tool: **Impact Radar**, a Change Impact Analyzer
 that combines vector search with knowledge graphs to answer questions like
 "What breaks if I change AuthEngine?" You do not need prior ML or NLP
@@ -28,8 +28,9 @@ diagrams and code pointers — no setup required to learn the concepts.
 | 4 | [Retrieval Strategies](04-retrieval-strategies.md) | ~20 min | Naive vs graph vs hybrid retrieval, two-stage pattern, metadata filtering, aggregation | `src/rag/retriever.py`, `src/rag/vector_store.py`, `src/graph/traverser.py` |
 | 5 | [Grounded Generation](05-grounded-generation.md) | ~20 min | Prompt engineering for RAG, hallucination prevention, prompt templates, evidence citation | `src/core/llm_client.py` |
 | 6 | [Architecture Walkthrough](06-architecture-walkthrough.md) | ~20 min | Full pipeline data flow, configuration, testing strategy, end-to-end trace | `src/analyzer/`, `src/api/`, `config/` |
+| 7 | [V2 Evolution](07-v2-evolution.md) | ~25 min | Universal ingestion, gap analysis, recompilation, enterprise security & privacy | `src/ingestion/`, `src/gap_analysis/`, `src/recompiler/`, `src/core/privacy_guard.py` |
 
-**Total reading time: approximately 2 hours.**
+**Total reading time: approximately 2.5 hours.**
 
 ---
 
@@ -86,6 +87,13 @@ Chapter 6  ties every piece together into the running application.
                   +-----------------------+
                   |  6. Architecture      |
                   |  Full pipeline        |
+                  +-----------+-----------+
+                              |
+                              v
+                  +-----------------------+
+                  |  7. V2 Evolution      |
+                  |  Ingestion, gaps,     |
+                  |  security, recompile  |
                   +-----------------------+
                               |
                               v
@@ -129,6 +137,11 @@ docs/                           src/
 06-architecture-walkthrough --> src/analyzer/  (orchestration)
                                 src/api/       (HTTP layer)
                                 config/        (runtime settings)
+07-v2-evolution             --> src/ingestion/ (codebase ingestion)
+                                src/gap_analysis/ (interactive gaps)
+                                src/recompiler/   (deployment prep)
+                                src/core/privacy_guard.py (security)
+                                src/core/sanitizer.py     (redaction)
 ```
 
 When a chapter references a concept, it points to the exact file where that
