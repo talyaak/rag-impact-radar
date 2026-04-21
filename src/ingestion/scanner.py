@@ -35,6 +35,19 @@ _SERVICE_MARKERS = {
     "pyproject.toml",
 }
 
+# Manifest files that describe a built artifact ("component"). Each
+# maps to a stable kind key used as the bucket name in
+# ScanResult.manifests_by_kind.
+_MANIFEST_KINDS_BY_NAME = {
+    "package.json": "package_json",
+}
+# Suffix-keyed manifests (e.g. Foo.csproj, Bar.sln). Matched by
+# Path.suffix.lower() after the exact-name match fails.
+_MANIFEST_KINDS_BY_SUFFIX = {
+    ".csproj": "csproj",
+    ".sln": "sln",
+}
+
 _DEFAULT_IGNORE = {
     ".git",
     "__pycache__",
@@ -72,6 +85,7 @@ class ServiceBoundary:
     python_files: list[Path] = field(default_factory=list)
     config_files: list[Path] = field(default_factory=list)
     doc_files: list[Path] = field(default_factory=list)
+    manifests: list[DiscoveredFile] = field(default_factory=list)
 
 
 @dataclass
@@ -85,10 +99,11 @@ class ScanResult:
     service_boundaries: list[ServiceBoundary] = field(default_factory=list)
     component_yamls: list[Path] = field(default_factory=list)
     variant_yamls: list[Path] = field(default_factory=list)
+    manifests_by_kind: dict[str, list[DiscoveredFile]] = field(default_factory=dict)
     total_files_scanned: int = 0
 
     def summary(self) -> dict[str, Any]:
-        return {
+        out = {
             "repo_root": str(self.repo_root),
             "python_files": len(self.python_files),
             "config_files": len(self.config_files),
@@ -98,6 +113,11 @@ class ScanResult:
             "existing_variant_yamls": len(self.variant_yamls),
             "total_files_scanned": self.total_files_scanned,
         }
+        if self.manifests_by_kind:
+            out["manifests_by_kind"] = {
+                kind: len(files) for kind, files in self.manifests_by_kind.items()
+            }
+        return out
 
 
 class CodebaseScanner:
@@ -151,9 +171,23 @@ class CodebaseScanner:
                 relative = str(filepath.relative_to(root))
                 ext = filepath.suffix.lower()
 
-                # Check for service markers
+                # Check for service markers. .sln files mark a service
+                # boundary grouping the projects they list.
                 if filename in _SERVICE_MARKERS:
                     service_dirs[current] = filename
+                elif ext == ".sln" and current not in service_dirs:
+                    service_dirs[current] = filename
+
+                # Detect manifests (package.json, *.csproj, *.sln) — they
+                # live alongside regular files and additionally get
+                # bucketed under ScanResult.manifests_by_kind so the
+                # parser can extract built-artifact components from them.
+                manifest_kind = _MANIFEST_KINDS_BY_NAME.get(filename)
+                if manifest_kind is None:
+                    manifest_kind = _MANIFEST_KINDS_BY_SUFFIX.get(ext)
+                if manifest_kind is not None:
+                    mdf = DiscoveredFile(filepath, relative, f"manifest:{manifest_kind}", size)
+                    result.manifests_by_kind.setdefault(manifest_kind, []).append(mdf)
 
                 # Classify the file
                 if ext in _PYTHON_EXTS:
@@ -182,6 +216,10 @@ class CodebaseScanner:
             for df in result.doc_files:
                 if df.path.is_relative_to(svc_dir):
                     boundary.doc_files.append(df.path)
+            for kind_files in result.manifests_by_kind.values():
+                for mf in kind_files:
+                    if mf.path.is_relative_to(svc_dir):
+                        boundary.manifests.append(mf)
             result.service_boundaries.append(boundary)
 
         # Detect existing Impact Radar YAML files
