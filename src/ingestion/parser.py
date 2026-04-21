@@ -13,6 +13,7 @@ the bipartite dependency graph and vector store.
 from __future__ import annotations
 
 import ast
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,7 @@ class ExtractedComponent:
     classes: list[str] = field(default_factory=list)
     functions: list[str] = field(default_factory=list)
     confidence: float = 1.0  # How confident we are this is a real component
+    language: str = "python"  # Default preserves backward compat with existing callers
 
     def to_yaml_dict(self) -> dict[str, Any]:
         """Convert to the YAML dict format expected by DependencyGraph.add_component()."""
@@ -89,6 +91,64 @@ def _to_snake_case(name: str) -> str:
 def _to_title_case(name: str) -> str:
     """Convert snake_case to Title Case."""
     return " ".join(word.capitalize() for word in name.split("_"))
+
+
+def _npm_id(raw: str) -> str:
+    """Filesystem-safe component/module ID derived from an npm name.
+
+    Scoped names like `@acme/auth-ui` become `acme__auth_ui`. Regular
+    names like `react-router` become `react_router`. The double
+    underscore is preserved as the scope separator so two distinct
+    packages don't collide on their short names.
+    """
+    cleaned = raw.strip()
+    if cleaned.startswith("@") and "/" in cleaned:
+        scope, name = cleaned[1:].split("/", 1)
+        scope = re.sub(r"[^A-Za-z0-9]+", "_", scope).strip("_").lower()
+        name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
+        return f"{scope}__{name}" if scope and name else (scope or name or "package")
+    return re.sub(r"[^A-Za-z0-9]+", "_", cleaned).strip("_").lower() or "package"
+
+
+def _is_internal_npm_dep(version_spec: str) -> bool:
+    """True for workspace protocol or file/path references."""
+    return (
+        version_spec.startswith("workspace:")
+        or version_spec.startswith("file:")
+        or version_spec.startswith("link:")
+        or version_spec.startswith("./")
+        or version_spec.startswith("../")
+    )
+
+
+def _extract_package_json_author(data: dict[str, Any]) -> str:
+    """Pull an author/team string from a package.json (best-effort)."""
+    author = data.get("author")
+    if isinstance(author, dict):
+        name = author.get("name")
+        if isinstance(name, str) and name:
+            return name
+    if isinstance(author, str) and author:
+        return author.split("<")[0].strip()
+    contributors = data.get("contributors")
+    if isinstance(contributors, list) and contributors:
+        first = contributors[0]
+        if isinstance(first, dict):
+            name = first.get("name")
+            if isinstance(name, str) and name:
+                return name
+        if isinstance(first, str) and first:
+            return first.split("<")[0].strip()
+    return ""
+
+
+def _infer_ts_or_js(package_json_path: Path, data: dict[str, Any]) -> str:
+    """Return "typescript" if there are TS signals, else "javascript"."""
+    if (package_json_path.parent / "tsconfig.json").exists():
+        return "typescript"
+    if data.get("types") or data.get("typings"):
+        return "typescript"
+    return "javascript"
 
 
 class CodebaseParser:
@@ -207,6 +267,82 @@ class CodebaseParser:
         analysis.module_docstring = ast.get_docstring(tree) or ""
 
         return analysis
+
+    def _analyze_package_json(
+        self,
+        discovered: DiscoveredFile,
+        repo_root: Path,
+    ) -> tuple[ExtractedComponent, list[ExtractedModule]] | None:
+        """Extract a component from a package.json manifest.
+
+        Returns (component, modules) tuple, or None if the manifest is
+        unreadable. Deps become tight-coupled modules; devDeps become
+        loose-coupled modules. `workspace:*` and relative-path deps are
+        recognized as internal. Label is `"typescript"` when a sibling
+        tsconfig.json exists or the package has a `"types"`/`"typings"`
+        field; otherwise `"javascript"`.
+        """
+        try:
+            data = json.loads(discovered.path.read_text(encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        raw_name = str(data.get("name") or discovered.path.parent.name or "package")
+        comp_id = _npm_id(raw_name)
+        description = str(data.get("description") or "").strip()
+        confidence = 1.0
+        if not description:
+            description = f"{raw_name} npm package"
+            confidence = 0.5
+
+        component = ExtractedComponent(
+            id=comp_id,
+            name=raw_name,
+            description=description.split("\n")[0][:500],
+            source_file=discovered.relative_path,
+            team_owner=_extract_package_json_author(data),
+            api_surface=sorted({
+                str(k) for k in (data.get("keywords") or []) if isinstance(k, str)
+            }),
+            confidence=confidence,
+            language=_infer_ts_or_js(discovered.path, data),
+        )
+
+        modules: list[ExtractedModule] = []
+        for dep_group, coupling in (("dependencies", "tight"), ("devDependencies", "loose")):
+            deps = data.get(dep_group) or {}
+            if not isinstance(deps, dict):
+                continue
+            for dep_name, dep_version in deps.items():
+                if not isinstance(dep_name, str):
+                    continue
+                version = str(dep_version)
+                is_internal = _is_internal_npm_dep(version)
+                mod_id = _npm_id(dep_name)
+                usage = (
+                    f"Internal workspace dep ({version})"
+                    if is_internal
+                    else f"npm {dep_group} ({version})"
+                )
+                component.modules.append({
+                    "module_id": mod_id,
+                    "usage": usage,
+                    "coupling": coupling,
+                })
+                modules.append(ExtractedModule(
+                    id=mod_id,
+                    name=dep_name,
+                    description=(
+                        f"Internal workspace package {dep_name}"
+                        if is_internal
+                        else f"External npm package {dep_name}"
+                    ),
+                    source_file=version if is_internal else "",
+                    used_by=[comp_id],
+                ))
+        return component, modules
 
     def _decorator_name(self, node: ast.expr) -> str:
         """Extract decorator name from AST node."""
