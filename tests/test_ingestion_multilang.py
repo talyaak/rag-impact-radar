@@ -346,3 +346,71 @@ class TestSlnGrouping:
             size_bytes=0,
         )
         assert parser._analyze_sln(fake_df, tmp_path) is None
+
+
+# ── Dispatch through CodebaseParser.parse() ──────────────────────────
+
+
+class TestParserDispatch:
+    def test_parse_emits_components_for_package_json_and_csproj(self, tmp_path: Path) -> None:
+        _write_package_json(tmp_path / "web" / "package.json", {
+            "name": "web-ui",
+            "description": "Storefront web app.",
+            "dependencies": {"react": "^18.0.0"},
+        })
+        _write_file(tmp_path / "svc" / "Api.csproj", textwrap.dedent("""\
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <AssemblyName>Api</AssemblyName>
+                <Description>Backend API.</Description>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Serilog" Version="3.1.1" />
+              </ItemGroup>
+            </Project>
+        """))
+
+        scanner = CodebaseScanner()
+        scan_result = scanner.scan(tmp_path)
+
+        parser = CodebaseParser()
+        parse_result = parser.parse(scan_result)
+
+        by_lang = {c.language for c in parse_result.components}
+        assert "javascript" in by_lang  # web-ui has no tsconfig / "types"
+        assert "csharp" in by_lang
+
+        ids = {c.id for c in parse_result.components}
+        assert "web_ui" in ids
+        assert "api" in ids
+
+        mod_ids = {m.id for m in parse_result.modules}
+        assert "react" in mod_ids
+        assert "serilog" in mod_ids
+
+    def test_parse_skips_languages_not_in_allowlist(self, tmp_path: Path) -> None:
+        _write_package_json(tmp_path / "web" / "package.json", {"name": "web"})
+        _write_file(tmp_path / "svc" / "Api.csproj", "<Project><PropertyGroup/></Project>")
+
+        scanner = CodebaseScanner()
+        scan_result = scanner.scan(tmp_path)
+
+        # Only allow csharp — package.json components should be skipped.
+        parser = CodebaseParser(languages={"csharp"})
+        parse_result = parser.parse(scan_result)
+
+        langs = {c.language for c in parse_result.components}
+        assert "javascript" not in langs
+        assert "typescript" not in langs
+        assert "csharp" in langs
+
+    def test_parse_emits_warning_for_malformed_csproj(self, tmp_path: Path) -> None:
+        _write_file(tmp_path / "Bad" / "Bad.csproj", "<Project><not closed")
+
+        scanner = CodebaseScanner()
+        scan_result = scanner.scan(tmp_path)
+
+        parser = CodebaseParser()
+        parse_result = parser.parse(scan_result)
+
+        assert any("Bad.csproj" in w for w in parse_result.warnings)

@@ -216,6 +216,7 @@ class CodebaseParser:
         self,
         component_detection: str = "auto",
         min_class_methods: int = 2,
+        languages: set[str] | None = None,
     ) -> None:
         """
         Args:
@@ -224,9 +225,17 @@ class CodebaseParser:
                 "directory" — treat each top-level directory as a component
                 "class" — treat each significant class as a component
             min_class_methods: Minimum methods for a class to be considered a component.
+            languages: Which language manifests to parse. Defaults to all supported
+                ({"python", "typescript", "javascript", "csharp"}). An empty set
+                disables all manifest parsers and falls back to Python-only.
         """
         self._detection = component_detection
         self._min_methods = min_class_methods
+        self._languages = (
+            {"python", "typescript", "javascript", "csharp"}
+            if languages is None
+            else set(languages)
+        )
 
     def parse(self, scan_result: ScanResult) -> ParseResult:
         """Parse all scanned files and extract structural information."""
@@ -234,10 +243,11 @@ class CodebaseParser:
 
         # Phase 1: Extract classes, functions, and imports from Python files
         file_analyses: dict[str, _FileAnalysis] = {}
-        for pf in scan_result.python_files:
-            analysis = self._analyze_python_file(pf)
-            if analysis:
-                file_analyses[pf.relative_path] = analysis
+        if "python" in self._languages:
+            for pf in scan_result.python_files:
+                analysis = self._analyze_python_file(pf)
+                if analysis:
+                    file_analyses[pf.relative_path] = analysis
 
         # Phase 2: Identify components based on detection strategy
         if self._detection == "directory":
@@ -263,7 +273,86 @@ class CodebaseParser:
         # Phase 5: Extract API surfaces from FastAPI/Flask patterns
         self._extract_api_surfaces(result.components, file_analyses)
 
+        # Phase 6: Extract components from non-Python manifest files
+        self._extract_from_manifests(scan_result, result)
+
         return result
+
+    def _extract_from_manifests(
+        self,
+        scan_result: ScanResult,
+        result: ParseResult,
+    ) -> None:
+        """Append manifest-derived components/modules to ``result``.
+
+        Runs after Python extraction so manifest components can't
+        shadow class-level ones. IDs that collide with an existing
+        component are dropped with a warning; duplicate modules merge
+        their ``used_by`` lists instead of being emitted twice.
+        """
+        repo_root = scan_result.repo_root
+        existing_ids = {c.id for c in result.components}
+        modules_by_id = {m.id: m for m in result.modules}
+
+        def _add_component(
+            component: ExtractedComponent,
+            modules: list[ExtractedModule],
+        ) -> None:
+            if component.id in existing_ids:
+                result.warnings.append(
+                    f"Manifest component '{component.id}' "
+                    f"({component.source_file}) collides with an existing "
+                    f"component id — skipping."
+                )
+                return
+            existing_ids.add(component.id)
+            result.components.append(component)
+            for mod in modules:
+                prior = modules_by_id.get(mod.id)
+                if prior is None:
+                    modules_by_id[mod.id] = mod
+                    result.modules.append(mod)
+                else:
+                    for user in mod.used_by:
+                        if user not in prior.used_by:
+                            prior.used_by.append(user)
+
+        package_jsons = scan_result.manifests_by_kind.get("package_json", [])
+        if package_jsons and self._languages & {"typescript", "javascript"}:
+            for manifest in package_jsons:
+                extracted = self._analyze_package_json(manifest, repo_root)
+                if extracted is None:
+                    result.warnings.append(
+                        f"Could not parse package.json at {manifest.relative_path}"
+                    )
+                    continue
+                component, modules = extracted
+                if component.language not in self._languages:
+                    continue
+                _add_component(component, modules)
+
+        csprojs = scan_result.manifests_by_kind.get("csproj", [])
+        if csprojs and "csharp" in self._languages:
+            for manifest in csprojs:
+                extracted = self._analyze_csproj(manifest, repo_root)
+                if extracted is None:
+                    result.warnings.append(
+                        f"Could not parse .csproj at {manifest.relative_path}"
+                    )
+                    continue
+                component, modules = extracted
+                _add_component(component, modules)
+
+        # .sln grouping: parse to surface malformed solutions as warnings.
+        # Component-level grouping (for artifact_granularity="service")
+        # ships in Chunk 5.
+        slns = scan_result.manifests_by_kind.get("sln", [])
+        if slns and "csharp" in self._languages:
+            for manifest in slns:
+                if self._analyze_sln(manifest, repo_root) is None:
+                    result.warnings.append(
+                        f"Could not parse .sln at {manifest.relative_path}"
+                    )
 
     def _analyze_python_file(self, discovered: DiscoveredFile) -> _FileAnalysis | None:
         """Parse a Python file using AST and extract structural info."""
