@@ -14,6 +14,12 @@
 
 ---
 
+## First run
+
+If you've never run V2 before, start with the **Getting Started with V2** section of the top-level README. It has a scripted 6-curl walkthrough, a `python scripts/learn.py` narrated tour that self-ingests this repo, and a table explaining which languages V2 extracts components from (Python via AST, TypeScript/JavaScript via `package.json`, C# via `.csproj`). Come back here for the architectural *why* after you've seen it run once.
+
+---
+
 ## What Changed Between V1 and V2
 
 V1 ships with a knowledge graph that someone wrote by hand. The seed data in
@@ -489,6 +495,8 @@ generation entirely.
 | **Embedding cache** | `EmbeddingCache` — persistent `SHA256(model + text) → vector` map. Cache hits serve embeddings locally at $0. Stored under `data/cache/embeddings.json`. |
 | **Batched suggestions** | Packing N gaps into one LLM call via `suggestion_batch_size`, returning a JSON array of suggestions. Falls back to per-gap on parse failure. |
 | **Cost projection** | Output of `POST /api/v2/ingest/estimate`: token counts, cache-hit projection, `$` total. No external API calls — safe to run before deciding to ingest. |
+| **Learning mode** | `LEARNING_MODE=1` in env or `.env`. `src/core/learning_narrator.py` prints a short "why we do this" block at each pipeline phase (startup → ingest → embedding → gaps → compile → analyze). Silent no-op when unset. Drive the whole tour end-to-end with `python scripts/learn.py`. |
+| **Artifact granularity** | `ingestion.artifact_granularity` in `config/model_config.yaml`: `"manifest"` (default, one component per `package.json` / `.csproj`), `"app"` (collapse nested workspace packages into the root), `"service"` (one component per Docker / `.sln` service boundary). |
 
 ---
 

@@ -82,6 +82,89 @@ curl -X POST http://localhost:8000/api/v1/analyze \
 
 ---
 
+## Getting Started with V2
+
+V2 ingests real codebases — Python (AST), TypeScript/JavaScript
+(`package.json`), and C# (`.csproj`) — then asks you to fill in the
+metadata gaps and recompiles the graph. Three entry points:
+
+| I want to…                                 | Do this                                    |
+| ------------------------------------------ | ------------------------------------------ |
+| See V1 work against the seed data         | Follow the Quickstart above — no API key needed |
+| Take a narrated tour of the whole V2 flow  | `python scripts/learn.py` (self-ingests this repo) |
+| Point V2 at my own repo                    | Follow the curl walkthrough below          |
+
+### Where do I put my repository?
+
+- **Local dev:** pass any absolute path on your host. Ingestion reads files directly; no copy is needed.
+- **Docker:** mount your repo read-only (e.g. `docker run -v /host/my-repo:/repos/my-repo:ro ...`) and pass `/repos/my-repo` as `repo_path`.
+- **Multi-repo:** call `POST /api/v2/ingest` once per repo root. The graph accumulates across calls.
+
+### V2 end-to-end in 6 curl calls
+
+Copy/paste works against the Impact Radar repo itself — point `repo_path` at `.` when running the server from the project root.
+
+```bash
+# 1. Start the server (LEARNING_MODE=1 is optional — it narrates each phase)
+LEARNING_MODE=1 uvicorn src.api.main:app
+
+# 2. Ingest — extract components from the repo. embed=false is free (no OpenAI).
+curl -X POST http://localhost:8000/api/v2/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": ".", "embed": false}'
+# → Expect components_ingested > 0 and components_by_language to list
+#   "python" (plus "typescript"/"javascript"/"csharp" if present). If zero,
+#   repo_path is wrong or every supported-language file is .gitignore'd.
+
+# 3. Detect gaps — graph-based, deterministic, no LLM cost.
+curl -X POST http://localhost:8000/api/v2/gaps/detect
+
+# 4. Start an interactive gap session. Requires OPENAI_API_KEY if you want
+#    LLM-generated suggestions; otherwise set enable_llm_suggestions: false in
+#    config/model_config.yaml for a graph-only session.
+curl -X POST http://localhost:8000/api/v2/gaps/start-session
+
+# 5. Accept the first suggestion (repeat per question_id you want resolved).
+curl -X POST http://localhost:8000/api/v2/gaps/answer \
+  -H "Content-Type: application/json" \
+  -d '{"question_id": "…", "accept_suggestion": true}'
+
+# 6. Recompile — rewrites data/components/*.yaml and data/variants/*.yaml.
+#    WARNING: this overwrites seed data if you ran it against this repo;
+#    use backup: true (the default) and/or a separate working directory.
+curl -X POST http://localhost:8000/api/v2/compile \
+  -H "Content-Type: application/json" \
+  -d '{"backup": true, "embed": false}'
+```
+
+### What to expect / what NOT to expect
+
+- ✅ **Offline by default:** `embed=false` and `use_llm=false` keep ingestion free of OpenAI calls. V1 analyze on seed data works right after server start.
+- ✅ **Multi-language ingestion:** Python classes extract via the stdlib AST; TS/JS components come from `package.json`; C# components from `.csproj` (grouped by `.sln` where present). That matches how ops/build teams think about components — one per publishable npm package, one per compiled .NET project. Disable any language via `ingestion.languages` in `config/model_config.yaml`. Coarsen via `ingestion.artifact_granularity`: `"manifest"` (default, one component per manifest), `"app"` (collapse nested workspaces into the root), `"service"` (one component per Docker/`.sln` boundary).
+- ✅ **Learning mode:** `LEARNING_MODE=1` in `.env` or the shell prints short "why we do this" blocks at each pipeline phase. Silent no-op when unset.
+- ⚠ **Sub-package granularity in TS/JS/C# is not shipped today.** If your TS repo is one giant `package.json` and you want class-level components inside it, that's a Phase 3 follow-up (opt-in tree-sitter source-level parsing).
+- ⚠ **Cross-language edges are best-effort.** A TS service calling a C# service via HTTP won't show up as a graph edge unless you describe the relationship during a gap session. Manifest-level internal deps (workspace:*, ProjectReference) *do* resolve.
+- ⚠ **Go, Rust, Java, Kotlin manifests** (`go.mod`, `Cargo.toml`, `pom.xml`, `build.gradle`) register as service boundaries but don't yet emit components. Ask and they ship — ~30 lines each.
+- ⚠ **Gap detection always finds some gaps.** 80% completeness is the configured target, not 100%. Manifest-extracted components especially need gap sessions to fill in `team_owner`, `criticality`, and rich descriptions.
+- ⚠ **LLM features cost real money.** `embed=true` or `use_llm=true` requires `OPENAI_API_KEY` (or `security.privacy.local_only_mode: true` in the YAML).
+
+### Learning mode
+
+`python scripts/learn.py` boots the app in-process, sets `LEARNING_MODE=1`, and walks the full pipeline end-to-end against this repo by default (or `--repo /path` for your own). It pauses between phases in a TTY and auto-advances otherwise. It does NOT call `/api/v2/compile` unless you pass `--compile`, so it's safe to run against the seed data.
+
+### Supported languages
+
+| Language   | Detection source        | One component per…                                                 |
+| ---------- | ----------------------- | ------------------------------------------------------------------ |
+| Python     | Stdlib AST on `.py`    | Class with ≥2 methods (existing heuristic, seed-compatible)        |
+| TypeScript | `package.json` manifest | Published package (labeled via sibling `tsconfig.json` or `"types"` field) |
+| JavaScript | `package.json` manifest | Published package (default label when no TS signals)               |
+| C#         | `.csproj` manifest      | Compiled project (grouped by `.sln` when present)                  |
+
+Go, Java, Rust, and Kotlin register as service boundaries today; full manifest parsers for them are a cheap Phase 3 addition.
+
+---
+
 ## Non-Obvious Impact Example
 
 This is the flagship scenario — the whole reason Impact Radar exists.
