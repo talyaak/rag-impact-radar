@@ -163,6 +163,39 @@ curl -X POST http://localhost:8000/api/v2/compile \
 
 Go, Java, Rust, and Kotlin register as service boundaries today; full manifest parsers for them are a cheap Phase 3 addition.
 
+### Adding a new language with a coding agent
+
+Rather than waiting on us, point a coding agent (GitHub Copilot Chat, Cursor, Claude Code, Aider, etc.) at the existing manifest parsers and have it generate the one you need. The manifest-based pattern is deliberately small and symmetric so an LLM can mirror it reliably on the first or second try — typical cost is a few cents per language.
+
+**What to look at as templates:**
+- `src/ingestion/parser.py` — `_analyze_package_json` (~75 lines, JSON parsing) and `_analyze_csproj` (~80 lines, XML parsing). These are the two reference implementations.
+- `src/ingestion/scanner.py` — the `_MANIFEST_KINDS_BY_NAME` and `_MANIFEST_KINDS_BY_SUFFIX` tables plus the routing block in `scan()`.
+- `tests/test_ingestion_multilang.py` — `TestPackageJsonParser` and `TestCsprojParser` classes, inline-fixture pattern.
+
+**Prompt template** (paste into your agent, edit the bracketed parts):
+
+> I want to extend Impact Radar V2 to extract components from `[MANIFEST_FILE]` files (e.g. `go.mod` / `Cargo.toml` / `pom.xml` / `build.gradle`) for `[LANGUAGE]`.
+>
+> Mirror the pattern from `src/ingestion/parser.py::_analyze_package_json`:
+> 1. Add a module-level helper that parses the manifest with a stdlib-only parser (no new runtime deps).
+> 2. Add `CodebaseParser._analyze_[kind]` that returns `tuple[ExtractedComponent, list[ExtractedModule]] | None`. Return None for malformed input.
+> 3. Label `ExtractedComponent.language` as `"[LANGUAGE]"`. Use a low-confidence (0.5) fallback when the manifest has no description.
+> 4. Emit direct deps as tight-coupling modules; dev/test deps as loose. Internal workspace/path refs become `ExtractedModule(description="Internal …")`.
+> 5. Register the kind in `src/ingestion/scanner.py::_MANIFEST_KINDS_BY_NAME` or `_MANIFEST_KINDS_BY_SUFFIX`.
+> 6. Wire it into `CodebaseParser._extract_from_manifests` alongside the existing package_json / csproj loops; gate on `"[LANGUAGE]" in self._languages`.
+> 7. Add `TestLanguageParser` tests in `tests/test_ingestion_multilang.py` mirroring `TestPackageJsonParser`: happy path, internal-vs-external dep classification, low-confidence fallback, malformed-input None, scanner routing.
+> 8. Add the language to `ingestion.languages` in `config/model_config.yaml` and to the "Supported languages" table in `README.md`.
+>
+> Do NOT touch `_analyze_python_file`, `ExtractedComponent.to_yaml_dict`, or anything in `src/graph/`, `src/rag/`, or `src/analyzer/` — those are already language-agnostic and the downstream pipeline consumes whatever we emit.
+
+**Guardrails** — these are what keep the agent honest:
+- `pytest tests/test_ingestion.py -q` must still show 23 passing. That's the non-regression canary for the Python path.
+- `pytest tests/test_ingestion_multilang.py -v` must include your new tests and all previous ones still pass.
+- `ExtractedComponent.to_yaml_dict()` shape must not change. If the agent tries to add a new key there, reject — it breaks the graph builder.
+- No new entries in `requirements.txt`. Everything uses the stdlib (`json`, `xml.etree.ElementTree`, `tomllib`, `re`). If your agent wants to pull in a 3rd-party parser, push back — stdlib is enough.
+
+**Reference cost** (as of 2026-04): generating a `go.mod` / `Cargo.toml` / `pom.xml` parser end-to-end with tests is typically one prompt + one follow-up for test fixes, 5–15k tokens total. Under $0.20 on Claude Opus or GPT-4o; usually free on Copilot's included tier.
+
 ---
 
 ## Non-Obvious Impact Example
