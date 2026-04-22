@@ -37,6 +37,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from dotenv import load_dotenv
+
+# Load .env so OPENAI_API_KEY / LEARNING_MODE surface via os.environ
+# without requiring shell export. No-op when .env is absent.
+load_dotenv(PROJECT_ROOT / ".env")
+
 from src.graph.builder import DependencyGraph
 from src.rag.vector_store import VectorStore
 from src.rag.embedder import ComponentEmbedder

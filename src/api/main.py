@@ -36,8 +36,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+# Load .env (if present) before any module reads os.environ — this
+# lets a local `.env` supply OPENAI_API_KEY and LEARNING_MODE without
+# polluting the shell. Silent no-op when the file is absent.
+load_dotenv()
 
 from src.graph.builder import DependencyGraph
 from src.graph.traverser import ImpactTraverser
