@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -149,6 +150,59 @@ def _infer_ts_or_js(package_json_path: Path, data: dict[str, Any]) -> str:
     if data.get("types") or data.get("typings"):
         return "typescript"
     return "javascript"
+
+
+def _csproj_id(raw: str) -> str:
+    """Filesystem-safe ID for a .NET assembly / project name."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", raw).strip("_").lower() or "project"
+
+
+def _local_tag(elem: ET.Element) -> str:
+    """Return the tag without its XML namespace prefix."""
+    tag = elem.tag
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag
+
+
+def _iter_local(parent: ET.Element, name: str):
+    """Yield direct children of ``parent`` whose local tag matches ``name``."""
+    for child in parent:
+        if _local_tag(child) == name:
+            yield child
+
+
+def _find_first_text(root: ET.Element, tag: str) -> str:
+    """First non-empty <tag> text anywhere under ``root`` (namespace-agnostic)."""
+    for elem in root.iter():
+        if _local_tag(elem) == tag:
+            text = (elem.text or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _csproj_relative_id(ref_path: str, csproj_path: Path, repo_root: Path) -> tuple[str, str]:
+    """Given a ProjectReference Include="../Foo/Foo.csproj", return (id, rel).
+
+    ``id`` is derived from the referenced project's filename stem.
+    ``rel`` is a repo-relative string path to the referenced project,
+    or the original (normalized) string if we can't resolve it.
+    """
+    normalized = ref_path.replace("\\", "/")
+    stem = Path(normalized).stem or normalized
+    try:
+        resolved = (csproj_path.parent / normalized).resolve()
+        rel = str(resolved.relative_to(repo_root))
+    except (OSError, ValueError):
+        rel = normalized
+    return _csproj_id(stem), rel
+
+
+_SLN_PROJECT_RE = re.compile(
+    r'^\s*Project\("\{[0-9A-Fa-f-]+\}"\)\s*=\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"\{[0-9A-Fa-f-]+\}"',
+    re.MULTILINE,
+)
 
 
 class CodebaseParser:
@@ -343,6 +397,128 @@ class CodebaseParser:
                     used_by=[comp_id],
                 ))
         return component, modules
+
+    def _analyze_csproj(
+        self,
+        discovered: DiscoveredFile,
+        repo_root: Path,
+    ) -> tuple[ExtractedComponent, list[ExtractedModule]] | None:
+        """Extract a component from a .NET .csproj manifest.
+
+        Handles both SDK-style (no xmlns) and legacy (xmlns) projects by
+        matching local tag names only. ``<ProjectReference>`` entries
+        become internal modules; ``<PackageReference>`` entries become
+        external modules. Component language is labeled ``"csharp"``.
+        Returns None for unreadable or malformed XML.
+        """
+        try:
+            tree = ET.parse(discovered.path)
+        except (ET.ParseError, OSError):
+            return None
+        root = tree.getroot()
+
+        assembly = _find_first_text(root, "AssemblyName")
+        package_id = _find_first_text(root, "PackageId")
+        project_stem = discovered.path.stem
+        raw_name = assembly or package_id or project_stem
+        comp_id = _csproj_id(raw_name)
+
+        description = _find_first_text(root, "Description")
+        confidence = 1.0
+        if not description:
+            description = f"{raw_name} .NET project"
+            confidence = 0.5
+
+        authors = _find_first_text(root, "Authors")
+        team_owner = authors.split(",")[0].strip() if authors else ""
+
+        tags_raw = _find_first_text(root, "PackageTags")
+        api_surface = sorted({t for t in re.split(r"[;,\s]+", tags_raw) if t}) if tags_raw else []
+
+        component = ExtractedComponent(
+            id=comp_id,
+            name=raw_name,
+            description=description.split("\n")[0][:500],
+            source_file=discovered.relative_path,
+            team_owner=team_owner,
+            api_surface=api_surface,
+            confidence=confidence,
+            language="csharp",
+        )
+
+        modules: list[ExtractedModule] = []
+
+        for ref in root.iter():
+            tag = _local_tag(ref)
+            if tag == "ProjectReference":
+                include = ref.get("Include") or ""
+                if not include:
+                    continue
+                mod_id, rel = _csproj_relative_id(include, discovered.path, repo_root)
+                component.modules.append({
+                    "module_id": mod_id,
+                    "usage": f"ProjectReference ({rel})",
+                    "coupling": "tight",
+                })
+                modules.append(ExtractedModule(
+                    id=mod_id,
+                    name=Path(include.replace("\\", "/")).stem or include,
+                    description=f"Internal .NET project referenced at {rel}",
+                    source_file=rel,
+                    used_by=[comp_id],
+                ))
+            elif tag == "PackageReference":
+                include = ref.get("Include") or ""
+                if not include:
+                    continue
+                version = ref.get("Version") or _find_first_text(ref, "Version") or ""
+                mod_id = _csproj_id(include)
+                component.modules.append({
+                    "module_id": mod_id,
+                    "usage": f"PackageReference ({version})" if version else "PackageReference",
+                    "coupling": "tight",
+                })
+                modules.append(ExtractedModule(
+                    id=mod_id,
+                    name=include,
+                    description=f"External NuGet package {include}",
+                    source_file="",
+                    used_by=[comp_id],
+                ))
+
+        return component, modules
+
+    def _analyze_sln(
+        self,
+        discovered: DiscoveredFile,
+        repo_root: Path,
+    ) -> tuple[str, list[str]] | None:
+        """Parse a .sln file to extract the list of .csproj paths it groups.
+
+        Returns ``(solution_name, csproj_relative_paths)`` or None if the
+        file is unreadable. Only ``.csproj`` entries are returned — the
+        .sln format also lists solution folders and other project types,
+        which we deliberately skip.
+        """
+        try:
+            text = discovered.path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            return None
+
+        csproj_paths: list[str] = []
+        for match in _SLN_PROJECT_RE.finditer(text):
+            _, project_path = match.group(1), match.group(2)
+            normalized = project_path.replace("\\", "/")
+            if not normalized.lower().endswith(".csproj"):
+                continue
+            try:
+                resolved = (discovered.path.parent / normalized).resolve()
+                rel = str(resolved.relative_to(repo_root))
+            except (OSError, ValueError):
+                rel = normalized
+            csproj_paths.append(rel)
+
+        return discovered.path.stem, csproj_paths
 
     def _decorator_name(self, node: ast.expr) -> str:
         """Extract decorator name from AST node."""
