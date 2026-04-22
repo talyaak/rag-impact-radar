@@ -124,6 +124,8 @@ class GapAnalyzer:
         gap_config = self._config.get("gap_analysis", {})
         self._max_questions_per_round = gap_config.get("max_questions_per_round", 10)
         self._auto_resolve_low = gap_config.get("auto_resolve_low_severity", True)
+        self._suggestion_batch_size = max(1, int(gap_config.get("suggestion_batch_size", 1)))
+        self._enable_llm_suggestions = gap_config.get("enable_llm_suggestions", True)
 
     @staticmethod
     def _load_config(config_path: str | Path) -> dict[str, Any]:
@@ -148,8 +150,8 @@ class GapAnalyzer:
             len(gap_report.critical_gaps),
         )
 
-        # Generate LLM suggestions for gaps
-        if self._llm is not None:
+        # Generate LLM suggestions for gaps (skippable via config)
+        if self._llm is not None and self._enable_llm_suggestions:
             self._generate_suggestions(gap_report)
 
         # Auto-resolve low severity gaps if configured
@@ -229,14 +231,21 @@ class GapAnalyzer:
             session.pending_questions = []
         else:
             # Generate new questions for remaining gaps
-            if self._llm is not None:
+            if self._llm is not None and self._enable_llm_suggestions:
                 self._generate_suggestions(new_report)
             session.pending_questions = self._build_questions(new_report)
 
         return session
 
     def _generate_suggestions(self, gap_report: GapReport) -> None:
-        """Use LLM to generate resolution suggestions for unresolved gaps."""
+        """Use LLM to generate resolution suggestions for unresolved gaps.
+
+        Packs up to `suggestion_batch_size` gaps into a single LLM call and
+        asks for a JSON array of suggestions. Falls back to per-gap calls
+        if batch_size == 1 or JSON parsing fails.
+        """
+        from src.core.learning_narrator import narrate
+
         if self._llm is None:
             return
 
@@ -244,35 +253,116 @@ class GapAnalyzer:
         if not unresolved:
             return
 
-        # Build context about the current graph state
-        graph_context = self._build_graph_context()
+        narrate("gaps.suggest", extra={"unresolved_gaps": len(unresolved)})
 
-        # Generate suggestions in batches
-        for gap in unresolved:
-            prompt = self._build_suggestion_prompt(gap, graph_context)
+        graph_context = self._build_graph_context()
+        batch_size = self._suggestion_batch_size
+
+        if batch_size <= 1:
+            for gap in unresolved:
+                self._suggest_single(gap, graph_context)
+            return
+
+        for offset in range(0, len(unresolved), batch_size):
+            batch = unresolved[offset : offset + batch_size]
             try:
-                if self._privacy_guard is not None:
-                    suggestion = self._privacy_guard.guarded_generate(
-                        self._llm,
-                        prompt=prompt,
-                        system_prompt=_GAP_SYSTEM_PROMPT,
-                        temperature=0.2,
-                        max_tokens=256,
-                    )
-                else:
-                    suggestion = self._llm.generate(
-                        prompt=prompt,
-                        system_prompt=_GAP_SYSTEM_PROMPT,
-                        temperature=0.2,
-                        max_tokens=256,
-                    )
-                gap.suggestion = suggestion.strip()
+                suggestions = self._suggest_batch(batch, graph_context)
             except Exception:
                 logger.warning(
-                    "Failed to generate suggestion for gap %s",
-                    gap.entity_id,
+                    "Batched suggestion failed; falling back to per-gap",
                     exc_info=True,
                 )
+                for gap in batch:
+                    self._suggest_single(gap, graph_context)
+                continue
+
+            # Merge by index (or fall back where missing)
+            for i, gap in enumerate(batch):
+                if i < len(suggestions) and suggestions[i]:
+                    gap.suggestion = suggestions[i].strip()
+                else:
+                    self._suggest_single(gap, graph_context)
+
+    def _suggest_single(self, gap: GapItem, graph_context: str) -> None:
+        """Legacy per-gap suggestion path. Used as fallback."""
+        prompt = self._build_suggestion_prompt(gap, graph_context)
+        try:
+            suggestion = self._call_llm(prompt, max_tokens=256)
+            gap.suggestion = suggestion.strip()
+        except Exception:
+            logger.warning(
+                "Failed to generate suggestion for gap %s",
+                gap.entity_id,
+                exc_info=True,
+            )
+
+    def _suggest_batch(
+        self,
+        gaps: list[GapItem],
+        graph_context: str,
+    ) -> list[str]:
+        """Ask the LLM for N suggestions in one call. Returns a list aligned
+        with `gaps` by index. Raises on parsing failure so the caller can
+        fall back to per-gap.
+        """
+        prompt = self._build_batch_suggestion_prompt(gaps, graph_context)
+        raw = self._call_llm(prompt, max_tokens=256 * max(1, len(gaps)))
+        parsed = self._parse_batch_response(raw, expected=len(gaps))
+        return parsed
+
+    def _call_llm(self, prompt: str, max_tokens: int) -> str:
+        """Unified LLM invocation that routes through PrivacyGuard if present."""
+        if self._privacy_guard is not None:
+            return self._privacy_guard.guarded_generate(
+                self._llm,
+                prompt=prompt,
+                system_prompt=_GAP_SYSTEM_PROMPT,
+                temperature=0.2,
+                max_tokens=max_tokens,
+            )
+        return self._llm.generate(
+            prompt=prompt,
+            system_prompt=_GAP_SYSTEM_PROMPT,
+            temperature=0.2,
+            max_tokens=max_tokens,
+        )
+
+    def _build_batch_suggestion_prompt(
+        self,
+        gaps: list[GapItem],
+        graph_context: str,
+    ) -> str:
+        """Pack N gaps into one prompt and request a JSON array response."""
+        lines = [graph_context, "", f"Below are {len(gaps)} detected gaps."]
+        for i, gap in enumerate(gaps):
+            lines.append(
+                f"[{i}] type={gap.gap_type.value} severity={gap.severity.value} "
+                f"entity={gap.entity_name} ({gap.entity_id}): {gap.description}"
+            )
+        lines.append("")
+        lines.append(
+            "Respond with a JSON array of exactly "
+            f"{len(gaps)} strings — one suggestion per gap, in the same order "
+            "as the gaps above. Each suggestion must be 1–2 sentences, specific, "
+            "and grounded in the graph context. Example format: "
+            '["suggestion for gap 0", "suggestion for gap 1", ...]. '
+            "Return ONLY the JSON array, no commentary."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_batch_response(raw: str, expected: int) -> list[str]:
+        """Parse the JSON array returned by the batched prompt."""
+        text = raw.strip()
+        # Some models wrap responses in ```json fences
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:].lstrip()
+        parsed = json.loads(text)
+        if not isinstance(parsed, list):
+            raise ValueError("Expected JSON array in batched suggestion response")
+        return [str(x) for x in parsed[:expected]]
 
     def _build_graph_context(self) -> str:
         """Build a summary of the current graph for LLM context."""

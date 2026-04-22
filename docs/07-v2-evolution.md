@@ -1,0 +1,504 @@
+# Chapter 7: V2 Evolution — From Seeded Demo to Self-Adapting System
+
+> **Reading time**: ~30 minutes
+> **Prerequisites**: Chapters 1–6
+> **After this chapter**: You'll understand how Impact Radar evolved from a
+> hand-crafted demo with 12 components and 8 variants into a self-adapting
+> product that can ingest any user codebase, refine its own knowledge graph
+> through an LLM-driven dialog with the user, and recompile itself for
+> deployment — all while enforcing an enterprise privacy layer on every
+> external API call.
+> **Project files**: `src/ingestion/`, `src/gap_analysis/`, `src/recompiler/`,
+> `src/core/sanitizer.py`, `src/core/privacy_guard.py`, V2 endpoints in
+> `src/api/main.py`
+
+---
+
+## First run
+
+If you've never run V2 before, start with the **Getting Started with V2** section of the top-level README. It has a scripted 6-curl walkthrough, a `python scripts/learn.py` narrated tour that self-ingests this repo, and a table explaining which languages V2 extracts components from (Python via AST, TypeScript/JavaScript via `package.json`, C# via `.csproj`). Come back here for the architectural *why* after you've seen it run once.
+
+---
+
+## What Changed Between V1 and V2
+
+V1 ships with a knowledge graph that someone wrote by hand. The seed data in
+`data/components/` and `data/variants/` is the entire universe the analyzer
+knows about. That's fine for a demo, but a real product needs to onboard
+unfamiliar codebases without anybody hand-authoring YAML.
+
+V2 keeps the V1 core untouched — bipartite graph, BFS traversal, two-stage
+retrieval, grounded prompts — and wraps it in three new subsystems plus a
+privacy layer:
+
+```
+      V1 (static demo)                  V2 (self-adapting product)
+   +------------------------+        +-----------------------------+
+   | hand-written YAMLs     |        | point at any repository     |
+   | 12 components,         |   -->  | scan -> AST parse -> extract|
+   | 8 variants             |        | detect gaps -> ask user     |
+   | analyze immediately    |        | refine graph -> recompile   |
+   |                        |        | generate validation tests   |
+   |                        |        | sanitize + audit every call |
+   +------------------------+        +-----------------------------+
+```
+
+**Mental model**: V2 is V1 with an *onboarding pipeline* in front of it and a
+*privacy gateway* around every outbound API call. The runtime that produces
+risk reports is exactly the same code as V1.
+
+---
+
+## The V2 Onboarding Pipeline in One Diagram
+
+Every box below is a real Python module. Every arrow is a real function call.
+No hidden magic.
+
+```
+   repo_path
+       |
+       v
+   +-----------------------------------------------------+
+   |  src/ingestion/                                     |
+   |    scanner.py   -> ScanResult (files classified)    |
+   |    parser.py    -> ParseResult (AST extractions)    |
+   |    engine.py    -> IngestionEngine.ingest()         |
+   +-----------------------------------------------------+
+       |
+       |  ExtractedComponent[], ExtractedModule[]
+       v
+   +-----------------------------------------------------+
+   |  src/graph/builder.py  (UNCHANGED FROM V1)          |
+   |    DependencyGraph.add_component(...)               |
+   +-----------------------------------------------------+
+       |
+       |  bipartite graph (incomplete, possibly noisy)
+       v
+   +-----------------------------------------------------+
+   |  src/gap_analysis/                                  |
+   |    detector.py  -> GapReport (orphans, ambiguity)   |
+   |    analyzer.py  -> AnalysisSession (LLM Q&A loop)   |
+   +-----------------------------------------------------+
+       |
+       |  curated graph (gaps resolved by human + LLM)
+       v
+   +-----------------------------------------------------+
+   |  src/recompiler/                                    |
+   |    recompiler.py     -> YAMLs + embeddings + manifest|
+   |    test_generator.py -> grounded pytest cases       |
+   +-----------------------------------------------------+
+       |
+       v
+   +-----------------------------------------------------+
+   |  V1 runtime (UNCHANGED): traverser + retriever      |
+   |    + analyzer + reporter + FastAPI                  |
+   +-----------------------------------------------------+
+```
+
+Crossing every dashed boundary above: `src/core/privacy_guard.py` wraps the
+LLM client and the embedding API. Nothing leaves the system without passing
+through the sanitizer first and being recorded in the audit log.
+
+---
+
+## Pillar 1: Universal Ingestion (`src/ingestion/`)
+
+The ingestion engine answers a simple question: *"Given an arbitrary
+repository on disk, what do we need to know about it before we can run
+impact analysis?"* Three modules cooperate to answer it.
+
+### `scanner.py` — file discovery and classification
+
+Walks the repository root and classifies every file it sees:
+
+- Python sources (`.py`)
+- Config files (`.yaml`, `.yml`, `.toml`, `.json`, `.ini`, `.cfg`, `.env`)
+- Documentation (`.md`, `.rst`, `.txt`)
+- Service markers (`Dockerfile`, `package.json`, `go.mod`, `pyproject.toml`,
+  `docker-compose.yaml`, ...)
+- Existing Impact Radar component/variant YAMLs (so V1 data can be reused
+  as-is)
+
+It honors a default ignore list (`.git`, `__pycache__`, `node_modules`,
+`.venv`, `build`, `dist`, ...) and a max-file-size cap to avoid blowing up
+on vendored binaries.
+
+### `parser.py` — AST extraction
+
+Walks each Python file with the standard-library `ast` module to extract:
+
+- Class definitions that look like components (classes with at least
+  `min_class_methods`, configurable in `model_config.yaml`).
+- Import edges (these become candidate shared modules).
+- Function signatures (these become the API surface).
+- Docstrings (these become the embeddable description text).
+
+Each extraction carries a `confidence` score so noisy detections can be
+flagged as low-confidence gaps later.
+
+### `engine.py` — orchestration
+
+`IngestionEngine.ingest(repo_path, embed=True)` runs the four phases in
+order: **scan → parse → graph build → embed**. It also accepts an existing
+graph and vector store so multiple repositories can be ingested
+incrementally. Output is an `IngestionResult` with a `.summary()` that
+feeds the `/api/v2/ingest` endpoint directly.
+
+**V1-compatible path**: `IngestionEngine.ingest_yaml_directory()` lets you
+load existing component/variant YAML directories without going through the
+AST parser. The V1 demo data keeps working unchanged.
+
+### Why AST over regex
+
+Regex extraction of "what is a component" produces a flood of false
+positives in any non-trivial codebase. AST gives us real class boundaries,
+real import edges, and real docstrings — the same things a human would
+point at if asked "is this a component?"
+
+---
+
+## Pillar 2: Interactive Gap Analysis (`src/gap_analysis/`)
+
+After ingestion, the graph is *real* but rarely *complete*. Some classes
+look like components but have no shared modules. Some shared modules are
+used by only one component. Some descriptions are empty. Some edges have
+the default `tight` coupling label because the parser had no way to know
+better.
+
+V2 treats these gaps as first-class objects.
+
+### `detector.py` — structural gap finder
+
+Defines the `GapType` enum:
+
+| GapType | Meaning |
+|---------|---------|
+| `ORPHAN_COMPONENT` | Component has no module connections |
+| `ISOLATED_MODULE` | Module is used by only one component |
+| `MISSING_DESCRIPTION` | Empty or auto-generated description |
+| `COUPLING_AMBIGUITY` | Every edge has the default coupling |
+| `NO_API_SURFACE` | Component exposes no public functions |
+| `NO_VARIANT_ASSIGNMENT` | Component is in no variant manifest |
+| `POTENTIAL_MISSING_LINK` | Two components in the same directory but not connected via any shared module |
+| `LOW_CONFIDENCE` | Parser flagged the extraction as weak |
+| `MISSING_CRITICALITY` | No criticality label set |
+
+Each finding becomes a `GapItem` with a severity (`CRITICAL`, `HIGH`,
+`MEDIUM`, `LOW`), a human-readable description, and a question to ask the
+user. The `GapReport` carries a `completeness_score` (0..1) so the API can
+report how curated the graph is.
+
+### `analyzer.py` — interactive refinement
+
+`GapAnalyzer.start_session()` returns an `AnalysisSession` that holds:
+
+- the gap report,
+- a list of pending questions (sorted critical-first),
+- a list of answered questions,
+- a snapshot of which graph mutations have been applied.
+
+The LLM is asked to *suggest* a default answer for each question (e.g.
+"based on the imports we saw, this component probably depends on
+`cache_layer` and `config_service`"). The user accepts or overrides each
+suggestion. Answers are applied as graph mutations: new module edges,
+filled descriptions, criticality labels, variant memberships.
+
+### Why a session instead of one-shot LLM extraction
+
+- **Grounded suggestions**: the LLM only sees structural context that came
+  out of the parser, not free-form invention.
+- **Human in the loop**: the user is the source of truth for ambiguous
+  intent ("is `BillingCore` part of Enterprise EU?").
+- **Resumable**: the FastAPI layer can stream questions over multiple HTTP
+  calls because the session lives in server state.
+
+---
+
+## Pillar 3: Dynamic Recompilation and Test Generation (`src/recompiler/`)
+
+Once the graph is curated, V2 has to *persist* it in a shape the V1 runtime
+can serve. That's the recompiler's job.
+
+### `recompiler.py` — produce deployment artifacts
+
+`DynamicRecompiler.compile(output_dir)` writes:
+
+- `components/*.yaml` — one file per component, V1-compatible schema.
+- `variants/*.yaml` — one file per variant.
+- Vector store contents (re-embedded if descriptions changed).
+- `model_config.yaml` — updated tuning parameters.
+- `manifest.json` — timestamp, source repo, gap-report summary, backup
+  paths, completeness score.
+
+**Backups**: existing `data/` files are moved to
+`data/backup-<timestamp>/` before being overwritten, so a recompilation
+can always be rolled back.
+
+**Why YAML output instead of an internal binary format**: the V1 runtime
+already loads YAML. Producing the same shape means the deployed system is
+identical to V1 in every way except where the data came from.
+
+### `test_generator.py` — auto-grounded validation suite
+
+`DynamicTestGenerator.generate()` inspects the curated graph and emits
+pytest cases in five categories:
+
+| Category | What it asserts |
+|----------|-----------------|
+| `direct_impact` | Depth-1 paths via shared modules |
+| `indirect_impact` | Multi-hop paths |
+| `variant` | Variant → component coverage |
+| `cycle` | Known cycles are handled correctly |
+| `embedding` | Each component is retrievable from the vector store under its own description |
+
+Every test carries a `grounding_evidence` field that says which graph
+fact it validates. There are no fabricated components and no invented
+relationships — the tests can only assert things the graph already says
+are true. This is the same grounding discipline as Chapter 5's prompt
+engineering, applied to test code.
+
+---
+
+## Pillar 4: The Privacy and Audit Layer (`src/core/`)
+
+V1 happily sent component descriptions and prompts to OpenAI. That's fine
+for a demo with synthetic seed data. It's unacceptable when the input is a
+real customer's source tree, which routinely contains secrets, PII, and
+internal infrastructure paths.
+
+V2 adds a single gateway every external API call must pass through.
+
+### `sanitizer.py` — `ContentSanitizer`
+
+Regex-based detection and redaction of:
+
+- API keys and tokens (AWS, GCP, Azure, GitHub, OpenAI, Slack, JWT)
+- Credentials (passwords, connection strings, private keys)
+- PII (email, phone, SSN, IP address)
+- File paths that reveal internal infrastructure
+- Source code beyond structural metadata
+- Environment variable values
+
+Redactions are **deterministic**: the same secret always becomes the same
+placeholder, so the sanitized text is still semantically coherent for the
+LLM. Three `RedactionLevel`s — `STRICT` (enterprise default), `MODERATE`,
+`MINIMAL` — control how aggressive the scrubbing is.
+
+### `privacy_guard.py` — `PrivacyGuard`
+
+The single gateway. Every caller (`ImpactAnalyzer`, `GapAnalyzer`, the
+embedder, the FastAPI handlers) goes through `PrivacyGuard` methods
+instead of calling `LLMClient` directly. `PrivacyGuard`:
+
+1. **Sanitizes** the payload via `ContentSanitizer`.
+2. **Classifies** the data (`PUBLIC`, `INTERNAL`, `CONFIDENTIAL`,
+   `RESTRICTED`). `RESTRICTED` content is blocked from leaving the system
+   entirely.
+3. **Enforces content size limits** (no accidental bulk exfiltration).
+4. **Honors a deny-list** of patterns that must never leave.
+5. **Honors local-only mode** — blocks all outbound calls and falls back
+   to local Sentence Transformers for embeddings.
+6. **Adds zero-training headers/config** to opt out of provider retention.
+7. **Appends an audit entry** to `privacy_audit.jsonl`: timestamp,
+   operation, destination, content hash (SHA-256 of the original, never
+   the content itself), redaction count, classification, block status.
+
+Two new V2 endpoints expose the audit layer to operators:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v2/privacy/audit` | Read the append-only log |
+| `GET /api/v2/privacy/status` | Current redaction level, local-only flag, deny-list patterns |
+
+**Why a single gateway**: piecemeal sanitization in N call sites
+guarantees that someone, eventually, forgets a call site. One gateway
+means "sanitization happened" is enforceable by code review.
+
+---
+
+## End-to-End Trace: Onboarding a New Repository
+
+A concrete walkthrough of using V2 against a fresh codebase:
+
+1. `POST /api/v2/ingest { "repo_path": "/srv/customer-app", "embed": true }`
+   → `IngestionEngine.ingest()` runs scan → parse → graph → embed.
+   Response: 47 components extracted, 112 modules, 9 warnings.
+
+2. `POST /api/v2/gaps/start-session`
+   → `GapDetector` finds 14 gaps (3 critical, 6 high, 5 medium).
+   `GapAnalyzer` asks the LLM to draft a suggestion for each.
+   Response: 14 `GapQuestion` objects, sorted critical-first.
+
+3. `GET /api/v2/gaps/questions`
+   → Returns the next pending question, e.g.: *"Component `PaymentRouter`
+   appears isolated. Suggested modules: `payment_gateway`, `audit_log`,
+   `feature_flags`. Accept or override?"*
+
+4. `POST /api/v2/gaps/answer { "gap_index": 0, "accept_suggestion": true }`
+   → Graph mutates: `PaymentRouter` gains three module edges.
+   Loop until pending queue is empty.
+
+5. `POST /api/v2/compile { "output_dir": "data/", "backup": true }`
+   → Existing `data/` moved to `data/backup-2026-04-21T13-05Z/`.
+   47 component YAMLs written, 8 variant YAMLs written.
+   Vector store re-embedded (sanitized first).
+   `manifest.json` written with `completeness_score = 0.93`.
+
+6. `POST /api/v2/generate-tests { "output_path": "tests/test_generated.py" }`
+   → 56 grounded tests written across the five categories. Each test
+   cites the graph fact it validates.
+
+7. `POST /api/v1/analyze { "changed_components": ["PaymentRouter"], ... }`
+   → V1 runtime serves the request against the freshly compiled graph.
+   Same code path as the V1 demo, different data underneath.
+
+Throughout: every LLM call in steps 2 and 7 went through `PrivacyGuard`.
+The operator can read `/api/v2/privacy/audit` afterwards to see exactly
+which calls were made, what was redacted, and whether anything was
+blocked.
+
+---
+
+## Pillar 5: Cost Control Guardrails
+
+Onboarding a multi-repository monorepo can produce thousands of embeddable
+documents and hundreds of detected gaps. Without guardrails, the first
+`POST /api/v2/ingest` would be billed per-document and per-gap. V2 adds
+three layers so the bill is predictable and, where possible, zero.
+
+### Content-hash embedding cache (`src/rag/embedding_cache.py`)
+
+`EmbeddingCache` is a persistent `SHA256(model + text) → vector` map.
+`LLMClient.get_embeddings_batch()` pre-scans the batch for cache hits and
+dispatches only the misses to the API. Cache keys include the model name,
+so switching `text-embedding-3-small` → `-3-large` does not return stale
+vectors. The cache persists as JSON under `data/cache/embeddings.json`
+and uses an `OrderedDict` with LRU eviction past `cache_max_entries`.
+
+Config (`config/model_config.yaml` → `embedding:`):
+
+```yaml
+cache_enabled: true
+cache_path: "data/cache/embeddings.json"
+cache_max_entries: 100000
+```
+
+The practical effect: re-ingesting the same repo after refinement is free
+for any description that did not change.
+
+### Batched gap suggestions (`src/gap_analysis/analyzer.py`)
+
+Under the hood the analyzer previously made one LLM call per gap. `V2`
+packs up to `suggestion_batch_size` gaps into a single prompt and asks
+for a JSON array of suggestions. Parse failures fall back to the
+per-gap path, so the feature is strictly additive.
+
+Config (`config/model_config.yaml` → `gap_analysis:`):
+
+```yaml
+suggestion_batch_size: 10      # 1 reproduces legacy behavior
+enable_llm_suggestions: true   # false skips the LLM entirely
+```
+
+Setting `enable_llm_suggestions: false` makes `GapAnalyzer.start_session()`
+produce questions straight from the detector — zero LLM cost, useful for
+fast iteration and for local-only deployments.
+
+### Dry-run cost estimator (`src/ingestion/estimator.py`)
+
+`CostEstimator` runs the free stages (scan, parse, graph build, gap
+detection) against a repository path, counts the documents a
+`ComponentEmbedder` would produce, subtracts cache hits, and multiplies
+by the per-million-token prices configured under `pricing:`. No
+embedding or LLM call is made. The API surface is
+`POST /api/v2/ingest/estimate`:
+
+```bash
+curl -X POST http://localhost:8000/api/v2/ingest/estimate \
+     -H 'Content-Type: application/json' \
+     -d '{"repo_path": "/path/to/monorepo"}'
+```
+
+The response is a projection with `components_found`, per-stage token
+counts, cache-hit projections, and a `total_cost_usd`. You read the
+projection before deciding to run the paid pipeline.
+
+Config (`config/model_config.yaml` → new `pricing:` block):
+
+```yaml
+pricing:
+  embedding_per_million_tokens: 0.02
+  llm_input_per_million_tokens: 2.50
+  llm_output_per_million_tokens: 10.00
+  chars_per_token: 4
+```
+
+### How the three stack up
+
+```
+  +----------------------------+
+  | 1. Estimate (free)         |  POST /api/v2/ingest/estimate
+  | → projected $ for this run |
+  +-------------+--------------+
+                |
+                v
+  +-------------+--------------+
+  | 2. Embedding cache         |  skip $ for docs seen before
+  | hits served at $0          |
+  +-------------+--------------+
+                |
+                v
+  +-------------+--------------+
+  | 3. Batched gap suggestions |  N gaps → 1 LLM call
+  | or disable LLM entirely    |
+  +----------------------------+
+```
+
+---
+
+## What Stayed Exactly the Same
+
+V2 is an addition, not a rewrite. None of the V1 modules were modified to
+change behavior:
+
+- `src/graph/builder.py` — bipartite graph schema
+- `src/graph/traverser.py` — BFS blast radius and cycle detection
+- `src/rag/embedder.py` — description → embeddable document
+- `src/rag/vector_store.py` — Chroma wrapper
+- `src/rag/retriever.py` — two-stage semantic search
+- `src/analyzer/impact.py` — structural + semantic merge and scoring
+- `src/analyzer/reporter.py` — terminal / JSON / markdown output
+
+The V2 endpoints exist alongside V1 under `/api/v1/`. Tests still run
+without an `OPENAI_API_KEY` because the privacy guard's local-only mode
+falls back to Sentence Transformers for embeddings and skips LLM
+generation entirely.
+
+---
+
+## Quick Reference (V2 Vocabulary)
+
+| Term | Definition |
+|------|------------|
+| **Ingestion** | The scan + AST parse + graph build pipeline that turns a repository into a populated `DependencyGraph`. |
+| **ExtractedComponent** | A class identified by the AST parser as a candidate component, carrying a confidence score. |
+| **Gap** | A finding from `GapDetector` that the graph is structurally incomplete (orphan, isolated module, missing description, coupling ambiguity, …). |
+| **Gap session** | A resumable interactive Q&A loop. The user accepts or overrides LLM-suggested defaults; each answer mutates the graph. |
+| **Completeness score** | `GapReport.completeness_score` in `[0, 1]`. `1.0` means every detected gap has been resolved. |
+| **Recompilation** | Persisting the curated graph as YAML + embeddings + manifest into a deployment-ready artifact, with backups of the prior `data/` directory. |
+| **Manifest** | `manifest.json` describing what was compiled, when, from which source repo, with what completeness. |
+| **Grounded test** | An auto-generated pytest case whose assertion is backed by a specific path in the graph; no fabricated components or relationships. |
+| **Sanitizer** | `ContentSanitizer` — the regex engine that scrubs secrets / PII / paths before any external API call. |
+| **Privacy guard** | `PrivacyGuard` — the single gateway every external API call must pass through. Sanitizes, classifies, enforces guardrails, audits. |
+| **Audit entry** | A single append-only line in `privacy_audit.jsonl` recording one outbound API call: hash (not content), redaction count, classification, block status. |
+| **Local-only mode** | A `PrivacyGuard` setting that blocks all outbound calls and falls back to local embeddings; lets the whole pipeline run with no external dependencies. |
+| **Embedding cache** | `EmbeddingCache` — persistent `SHA256(model + text) → vector` map. Cache hits serve embeddings locally at $0. Stored under `data/cache/embeddings.json`. |
+| **Batched suggestions** | Packing N gaps into one LLM call via `suggestion_batch_size`, returning a JSON array of suggestions. Falls back to per-gap on parse failure. |
+| **Cost projection** | Output of `POST /api/v2/ingest/estimate`: token counts, cache-hit projection, `$` total. No external API calls — safe to run before deciding to ingest. |
+| **Learning mode** | `LEARNING_MODE=1` in env or `.env`. `src/core/learning_narrator.py` prints a short "why we do this" block at each pipeline phase (startup → ingest → embedding → gaps → compile → analyze). Silent no-op when unset. Drive the whole tour end-to-end with `python scripts/learn.py`. |
+| **Artifact granularity** | `ingestion.artifact_granularity` in `config/model_config.yaml`: `"manifest"` (default, one component per `package.json` / `.csproj`), `"app"` (collapse nested workspace packages into the root), `"service"` (one component per Docker / `.sln` service boundary). |
+
+---
+
+*That's V2 — same V1 brain, with a careful onboarding pipeline in front of
+it and a privacy gateway around every byte that leaves the system.*

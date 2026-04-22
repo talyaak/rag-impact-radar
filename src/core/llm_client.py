@@ -33,6 +33,8 @@ from typing import Any
 import yaml
 from openai import OpenAI, APIError, RateLimitError, APIConnectionError, APITimeoutError
 
+from src.rag.embedding_cache import EmbeddingCache
+
 
 class LLMClient:
     """Config-driven OpenAI client with automatic retry logic.
@@ -90,6 +92,18 @@ class LLMClient:
             api_key=api_key,
             timeout=self._timeout,
             default_headers=default_headers if default_headers else None,
+        )
+
+        # Embedding cache: SHA-256(text+model) -> embedding vector.
+        # Skips paying the API for identical descriptions across re-runs.
+        embed_config = self._config.get("embedding", {})
+        cache_path = embed_config.get("cache_path", "data/cache/embeddings.json")
+        cache_max = embed_config.get("cache_max_entries", 100_000)
+        cache_on = embed_config.get("cache_enabled", True)
+        self._embedding_cache = EmbeddingCache(
+            cache_path=cache_path,
+            max_entries=cache_max,
+            enabled=cache_on,
         )
 
     @staticmethod
@@ -208,6 +222,10 @@ class LLMClient:
         embed_config = self._config.get("embedding", {})
         embed_model = model or embed_config.get("model", "text-embedding-3-small")
 
+        cached = self._embedding_cache.get(text, embed_model)
+        if cached is not None:
+            return cached
+
         last_error: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
@@ -215,7 +233,10 @@ class LLMClient:
                     model=embed_model,
                     input=text,
                 )
-                return response.data[0].embedding
+                vec = response.data[0].embedding
+                self._embedding_cache.put(text, embed_model, vec)
+                self._embedding_cache.flush()
+                return vec
 
             except (RateLimitError, APIConnectionError, APITimeoutError) as e:
                 last_error = e
@@ -249,10 +270,23 @@ class LLMClient:
         embed_model = model or embed_config.get("model", "text-embedding-3-small")
         batch_size = embed_config.get("batch_size", 100)
 
-        all_embeddings: list[list[float]] = []
+        # Pre-scan for cache hits. Only uncached texts go to the API; the
+        # original ordering is preserved when merging hits + API results.
+        results: list[list[float] | None] = [None] * len(texts)
+        miss_indices: list[int] = []
+        miss_texts: list[str] = []
+        for i, text in enumerate(texts):
+            cached = self._embedding_cache.get(text, embed_model)
+            if cached is not None:
+                results[i] = cached
+            else:
+                miss_indices.append(i)
+                miss_texts.append(text)
 
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
+        # Dispatch only the cache misses, in batches.
+        for offset in range(0, len(miss_texts), batch_size):
+            batch = miss_texts[offset : offset + batch_size]
+            batch_idx = miss_indices[offset : offset + batch_size]
 
             last_error: Exception | None = None
             for attempt in range(self._max_retries + 1):
@@ -261,8 +295,11 @@ class LLMClient:
                         model=embed_model,
                         input=batch,
                     )
-                    batch_embeddings = [d.embedding for d in response.data]
-                    all_embeddings.extend(batch_embeddings)
+                    for local_i, d in enumerate(response.data):
+                        vec = d.embedding
+                        orig_i = batch_idx[local_i]
+                        results[orig_i] = vec
+                        self._embedding_cache.put(texts[orig_i], embed_model, vec)
                     break
 
                 except (RateLimitError, APIConnectionError, APITimeoutError) as e:
@@ -276,7 +313,11 @@ class LLMClient:
             else:
                 raise last_error  # type: ignore[misc]
 
-        return all_embeddings
+        # Persist once at the end of the batch — amortizes disk I/O.
+        self._embedding_cache.flush()
+
+        # At this point every slot is filled.
+        return [r for r in results if r is not None]
 
     @property
     def model(self) -> str:
@@ -285,3 +326,7 @@ class LLMClient:
     @property
     def config(self) -> dict[str, Any]:
         return dict(self._config)
+
+    @property
+    def embedding_cache(self) -> EmbeddingCache:
+        return self._embedding_cache

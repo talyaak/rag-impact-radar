@@ -36,17 +36,25 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+# Load .env (if present) before any module reads os.environ — this
+# lets a local `.env` supply OPENAI_API_KEY and LEARNING_MODE without
+# polluting the shell. Silent no-op when the file is absent.
+load_dotenv()
 
 from src.graph.builder import DependencyGraph
 from src.graph.traverser import ImpactTraverser
 from src.rag.vector_store import VectorStore
 from src.rag.embedder import ComponentEmbedder
 from src.rag.retriever import SemanticRetriever
+from src.core.learning_narrator import narrate
 from src.core.llm_client import LLMClient
 from src.core.privacy_guard import PrivacyGuard
 from src.ingestion.engine import IngestionEngine
+from src.ingestion.estimator import CostEstimator
 from src.gap_analysis.analyzer import GapAnalyzer, GapAnswer, AnalysisSession
 from src.gap_analysis.detector import GapDetector
 from src.recompiler.recompiler import DynamicRecompiler
@@ -84,6 +92,8 @@ async def _lifespan(app: FastAPI):  # noqa: ANN201, ARG001
     """
     global _dep_graph, _vector_store, _retriever, _llm_client, _privacy_guard  # noqa: PLW0603
 
+    narrate("startup")
+
     # ── Initialize Privacy Guard (before any external API calls) ────
     logger.info("Initializing privacy guard")
     _privacy_guard = PrivacyGuard.from_config(_CONFIG_PATH)
@@ -97,6 +107,7 @@ async def _lifespan(app: FastAPI):  # noqa: ANN201, ARG001
 
     logger.info("Building dependency graph from %s / %s", _COMPONENTS_DIR, _VARIANTS_DIR)
     _dep_graph = DependencyGraph(_COMPONENTS_DIR, _VARIANTS_DIR)
+    narrate("seed_data_loaded")
 
     logger.info("Connecting to vector store")
     _vector_store = VectorStore(config_path=_CONFIG_PATH)
@@ -551,6 +562,23 @@ class IngestRequest(BaseModel):
     )
 
 
+class EstimateRequest(BaseModel):
+    """Request body for dry-run cost estimation."""
+
+    repo_path: str = Field(
+        ...,
+        description="Absolute path to the repository to project costs for.",
+    )
+    include_embeddings: bool = Field(
+        True,
+        description="Project embedding cost (skips if you only care about gap costs).",
+    )
+    include_gap_suggestions: bool = Field(
+        True,
+        description="Project LLM gap-suggestion cost.",
+    )
+
+
 class IngestFromYamlRequest(BaseModel):
     """Request body for ingesting from existing YAML directories."""
 
@@ -642,6 +670,33 @@ def ingest_from_yaml(request: IngestFromYamlRequest) -> dict[str, Any]:
         _retriever = SemanticRetriever.from_config(_vector_store, _vector_store.config)
 
     return result.summary()
+
+
+@app.post(
+    "/api/v2/ingest/estimate",
+    description="Dry-run: project token counts and cost without hitting any external API.",
+    tags=["v2-onboarding"],
+)
+def estimate_ingest_cost(request: EstimateRequest) -> dict[str, Any]:
+    """Project what ingesting this repo would cost before paying for it.
+
+    Runs the free stages (scan + parse + gap detection) and multiplies
+    counts by the prices configured under `pricing:` in model_config.yaml.
+    The embedding cache is consulted so cache hits are excluded from the
+    projected cost. Makes no external API calls.
+    """
+    import yaml
+    with open(_CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f) or {}
+
+    cache = _llm_client.embedding_cache if _llm_client is not None else None
+    estimator = CostEstimator(config=cfg, embedding_cache=cache)
+    projection = estimator.estimate(
+        repo_path=request.repo_path,
+        include_embeddings=request.include_embeddings,
+        include_gap_suggestions=request.include_gap_suggestions,
+    )
+    return projection.to_dict()
 
 
 # ── V2 Endpoints: Gap Analysis ──────────────────────────────────────────

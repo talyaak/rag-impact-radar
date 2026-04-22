@@ -82,6 +82,122 @@ curl -X POST http://localhost:8000/api/v1/analyze \
 
 ---
 
+## Getting Started with V2
+
+V2 ingests real codebases — Python (AST), TypeScript/JavaScript
+(`package.json`), and C# (`.csproj`) — then asks you to fill in the
+metadata gaps and recompiles the graph. Three entry points:
+
+| I want to…                                 | Do this                                    |
+| ------------------------------------------ | ------------------------------------------ |
+| See V1 work against the seed data         | Follow the Quickstart above — no API key needed |
+| Take a narrated tour of the whole V2 flow  | `python scripts/learn.py` (self-ingests this repo) |
+| Point V2 at my own repo                    | Follow the curl walkthrough below          |
+
+### Where do I put my repository?
+
+- **Local dev:** pass any absolute path on your host. Ingestion reads files directly; no copy is needed.
+- **Docker:** mount your repo read-only (e.g. `docker run -v /host/my-repo:/repos/my-repo:ro ...`) and pass `/repos/my-repo` as `repo_path`.
+- **Multi-repo:** call `POST /api/v2/ingest` once per repo root. The graph accumulates across calls.
+
+### V2 end-to-end in 6 curl calls
+
+Copy/paste works against the Impact Radar repo itself — point `repo_path` at `.` when running the server from the project root.
+
+```bash
+# 1. Start the server (LEARNING_MODE=1 is optional — it narrates each phase)
+LEARNING_MODE=1 uvicorn src.api.main:app
+
+# 2. Ingest — extract components from the repo. embed=false is free (no OpenAI).
+curl -X POST http://localhost:8000/api/v2/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": ".", "embed": false}'
+# → Expect components_ingested > 0 and components_by_language to list
+#   "python" (plus "typescript"/"javascript"/"csharp" if present). If zero,
+#   repo_path is wrong or every supported-language file is .gitignore'd.
+
+# 3. Detect gaps — graph-based, deterministic, no LLM cost.
+curl -X POST http://localhost:8000/api/v2/gaps/detect
+
+# 4. Start an interactive gap session. Requires OPENAI_API_KEY if you want
+#    LLM-generated suggestions; otherwise set enable_llm_suggestions: false in
+#    config/model_config.yaml for a graph-only session.
+curl -X POST http://localhost:8000/api/v2/gaps/start-session
+
+# 5. Accept the first suggestion (repeat per question_id you want resolved).
+curl -X POST http://localhost:8000/api/v2/gaps/answer \
+  -H "Content-Type: application/json" \
+  -d '{"question_id": "…", "accept_suggestion": true}'
+
+# 6. Recompile — rewrites data/components/*.yaml and data/variants/*.yaml.
+#    WARNING: this overwrites seed data if you ran it against this repo;
+#    use backup: true (the default) and/or a separate working directory.
+curl -X POST http://localhost:8000/api/v2/compile \
+  -H "Content-Type: application/json" \
+  -d '{"backup": true, "embed": false}'
+```
+
+### What to expect / what NOT to expect
+
+- ✅ **Offline by default:** `embed=false` and `use_llm=false` keep ingestion free of OpenAI calls. V1 analyze on seed data works right after server start.
+- ✅ **Multi-language ingestion:** Python classes extract via the stdlib AST; TS/JS components come from `package.json`; C# components from `.csproj` (grouped by `.sln` where present). That matches how ops/build teams think about components — one per publishable npm package, one per compiled .NET project. Disable any language via `ingestion.languages` in `config/model_config.yaml`. Coarsen via `ingestion.artifact_granularity`: `"manifest"` (default, one component per manifest), `"app"` (collapse nested workspaces into the root), `"service"` (one component per Docker/`.sln` boundary).
+- ✅ **Learning mode:** `LEARNING_MODE=1` in `.env` or the shell prints short "why we do this" blocks at each pipeline phase. Silent no-op when unset.
+- ⚠ **Sub-package granularity in TS/JS/C# is not shipped today.** If your TS repo is one giant `package.json` and you want class-level components inside it, that's a Phase 3 follow-up (opt-in tree-sitter source-level parsing).
+- ⚠ **Cross-language edges are best-effort.** A TS service calling a C# service via HTTP won't show up as a graph edge unless you describe the relationship during a gap session. Manifest-level internal deps (workspace:*, ProjectReference) *do* resolve.
+- ⚠ **Go, Rust, Java, Kotlin manifests** (`go.mod`, `Cargo.toml`, `pom.xml`, `build.gradle`) register as service boundaries but don't yet emit components. Ask and they ship — ~30 lines each.
+- ⚠ **Gap detection always finds some gaps.** 80% completeness is the configured target, not 100%. Manifest-extracted components especially need gap sessions to fill in `team_owner`, `criticality`, and rich descriptions.
+- ⚠ **LLM features cost real money.** `embed=true` or `use_llm=true` requires `OPENAI_API_KEY` (or `security.privacy.local_only_mode: true` in the YAML).
+
+### Learning mode
+
+`python scripts/learn.py` boots the app in-process, sets `LEARNING_MODE=1`, and walks the full pipeline end-to-end against this repo by default (or `--repo /path` for your own). It pauses between phases in a TTY and auto-advances otherwise. It does NOT call `/api/v2/compile` unless you pass `--compile`, so it's safe to run against the seed data.
+
+### Supported languages
+
+| Language   | Detection source        | One component per…                                                 |
+| ---------- | ----------------------- | ------------------------------------------------------------------ |
+| Python     | Stdlib AST on `.py`    | Class with ≥2 methods (existing heuristic, seed-compatible)        |
+| TypeScript | `package.json` manifest | Published package (labeled via sibling `tsconfig.json` or `"types"` field) |
+| JavaScript | `package.json` manifest | Published package (default label when no TS signals)               |
+| C#         | `.csproj` manifest      | Compiled project (grouped by `.sln` when present)                  |
+
+Go, Java, Rust, and Kotlin register as service boundaries today; full manifest parsers for them are a cheap Phase 3 addition.
+
+### Adding a new language with a coding agent
+
+Rather than waiting on us, point a coding agent (GitHub Copilot Chat, Cursor, Claude Code, Aider, etc.) at the existing manifest parsers and have it generate the one you need. The manifest-based pattern is deliberately small and symmetric so an LLM can mirror it reliably on the first or second try — typical cost is a few cents per language.
+
+**What to look at as templates:**
+- `src/ingestion/parser.py` — `_analyze_package_json` (~75 lines, JSON parsing) and `_analyze_csproj` (~80 lines, XML parsing). These are the two reference implementations.
+- `src/ingestion/scanner.py` — the `_MANIFEST_KINDS_BY_NAME` and `_MANIFEST_KINDS_BY_SUFFIX` tables plus the routing block in `scan()`.
+- `tests/test_ingestion_multilang.py` — `TestPackageJsonParser` and `TestCsprojParser` classes, inline-fixture pattern.
+
+**Prompt template** (paste into your agent, edit the bracketed parts):
+
+> I want to extend Impact Radar V2 to extract components from `[MANIFEST_FILE]` files (e.g. `go.mod` / `Cargo.toml` / `pom.xml` / `build.gradle`) for `[LANGUAGE]`.
+>
+> Mirror the pattern from `src/ingestion/parser.py::_analyze_package_json`:
+> 1. Add a module-level helper that parses the manifest with a stdlib-only parser (no new runtime deps).
+> 2. Add `CodebaseParser._analyze_[kind]` that returns `tuple[ExtractedComponent, list[ExtractedModule]] | None`. Return None for malformed input.
+> 3. Label `ExtractedComponent.language` as `"[LANGUAGE]"`. Use a low-confidence (0.5) fallback when the manifest has no description.
+> 4. Emit direct deps as tight-coupling modules; dev/test deps as loose. Internal workspace/path refs become `ExtractedModule(description="Internal …")`.
+> 5. Register the kind in `src/ingestion/scanner.py::_MANIFEST_KINDS_BY_NAME` or `_MANIFEST_KINDS_BY_SUFFIX`.
+> 6. Wire it into `CodebaseParser._extract_from_manifests` alongside the existing package_json / csproj loops; gate on `"[LANGUAGE]" in self._languages`.
+> 7. Add `TestLanguageParser` tests in `tests/test_ingestion_multilang.py` mirroring `TestPackageJsonParser`: happy path, internal-vs-external dep classification, low-confidence fallback, malformed-input None, scanner routing.
+> 8. Add the language to `ingestion.languages` in `config/model_config.yaml` and to the "Supported languages" table in `README.md`.
+>
+> Do NOT touch `_analyze_python_file`, `ExtractedComponent.to_yaml_dict`, or anything in `src/graph/`, `src/rag/`, or `src/analyzer/` — those are already language-agnostic and the downstream pipeline consumes whatever we emit.
+
+**Guardrails** — these are what keep the agent honest:
+- `pytest tests/test_ingestion.py -q` must still show 23 passing. That's the non-regression canary for the Python path.
+- `pytest tests/test_ingestion_multilang.py -v` must include your new tests and all previous ones still pass.
+- `ExtractedComponent.to_yaml_dict()` shape must not change. If the agent tries to add a new key there, reject — it breaks the graph builder.
+- No new entries in `requirements.txt`. Everything uses the stdlib (`json`, `xml.etree.ElementTree`, `tomllib`, `re`). If your agent wants to pull in a 3rd-party parser, push back — stdlib is enough.
+
+**Reference cost** (as of 2026-04): generating a `go.mod` / `Cargo.toml` / `pom.xml` parser end-to-end with tests is typically one prompt + one follow-up for test fixes, 5–15k tokens total. Under $0.20 on Claude Opus or GPT-4o; usually free on Copilot's included tier.
+
+---
+
 ## Non-Obvious Impact Example
 
 This is the flagship scenario — the whole reason Impact Radar exists.
@@ -128,7 +244,82 @@ strength. The LLM explains; it doesn't invent.
 
 ---
 
+## V2 Evolution — From Seeded Demo to Self-Adapting System
+
+V1 ships with a hand-crafted dependency graph (12 components, 8 variants). V2
+turns Impact Radar into a **self-adapting system** that can onboard any user
+codebase, refine its own knowledge graph through an LLM-driven dialog with the
+user, and recompile itself for deployment — all while enforcing enterprise
+privacy guardrails on every external call.
+
+```
+         V1 (static demo)                     V2 (self-adapting product)
+  ┌──────────────────────────┐        ┌───────────────────────────────────┐
+  │ hand-written YAMLs       │        │ point at any repository           │
+  │ 12 components, 8 variants │   →    │ scan → AST parse → extract        │
+  │ analyze immediately      │        │ detect gaps → ask user → refine   │
+  │                          │        │ recompile → generate tests         │
+  │                          │        │ sanitize + audit every API call    │
+  └──────────────────────────┘        └───────────────────────────────────┘
+```
+
+**Three new subsystems, one new privacy layer:**
+
+| Module | Role | Entry point |
+|--------|------|-------------|
+| `src/ingestion/` | Universal codebase onboarding: scan files, AST-parse Python, build graph | `IngestionEngine.ingest(repo_path)` |
+| `src/gap_analysis/` | Detect orphans/ambiguities and run an interactive LLM refinement loop | `GapAnalyzer.start_session()` |
+| `src/recompiler/` | Persist the curated graph as YAML + embeddings + deployment manifest, and auto-generate grounded tests | `DynamicRecompiler.compile()` |
+| `src/core/privacy_guard.py` | Single gateway that sanitizes, classifies, and audits every external API call (plus local-only mode and zero-training headers) | `PrivacyGuard.generate(...)` |
+
+**Onboarding flow** (end-to-end):
+
+```
+  repo_path
+      │
+      ▼
+  [ingestion] scan → parse (AST) → ExtractedComponents
+      │
+      ▼
+  [graph builder] bipartite DependencyGraph (from V1, reused as-is)
+      │
+      ▼
+  [gap_analysis] detect → LLM suggests → user answers → graph mutates
+      │             ┌──────────────────────────┐
+      │             │ orphans, missing descs,  │
+      │             │ coupling ambiguity, etc. │
+      │             └──────────────────────────┘
+      ▼
+  [recompiler] export YAML + embed + write manifest → production-ready
+      │
+      ▼
+  [test_generator] auto-generate pytest cases grounded in the graph
+```
+
+Every arrow that touches an external LLM or embedding API goes through
+`PrivacyGuard`, which redacts secrets/PII, enforces size and deny-list
+guardrails, and appends a tamper-evident entry to `privacy_audit.jsonl`.
+
+**Cost control guardrails.** Onboarding a multi-repo monorepo is cheap by
+default because V2 ships three layers of cost controls:
+
+- **Content-hash embedding cache** (`src/rag/embedding_cache.py`) — persistent
+  `SHA256(model + text) → vector` map; re-ingesting identical descriptions
+  is served locally at $0.
+- **Batched gap suggestions** — `suggestion_batch_size` packs N gaps into
+  one LLM call; `enable_llm_suggestions: false` skips the LLM entirely.
+- **Dry-run estimator** — `POST /api/v2/ingest/estimate` projects token
+  counts and USD cost with zero external calls, so you see the bill before
+  paying it.
+
+See [Chapter 7: The V2 Evolution](docs/07-v2-evolution.md) for the full
+architectural walkthrough and the design tradeoffs behind each subsystem.
+
+---
+
 ## API Endpoints
+
+### V1 — static seed data
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -140,6 +331,23 @@ strength. The LLM explains; it doesn't invent.
 | GET | `/api/v1/graph/summary` | Graph statistics |
 | POST | `/api/v1/analyze` | Full impact analysis |
 | POST | `/api/v1/embeddings/rebuild` | Rebuild vector store |
+
+### V2 — onboarding, refinement, and privacy
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v2/ingest` | Scan and parse a repository into a dependency graph |
+| POST | `/api/v2/ingest/yaml` | V1-compatible ingestion from existing YAML directories |
+| POST | `/api/v2/ingest/estimate` | Dry-run cost projection (no external API calls) |
+| POST | `/api/v2/gaps/detect` | Run structural gap detection on the current graph |
+| POST | `/api/v2/gaps/start-session` | Begin an interactive gap-analysis session with LLM suggestions |
+| GET  | `/api/v2/gaps/questions` | Get pending questions from the active session |
+| POST | `/api/v2/gaps/answer` | Submit answers and refine the graph |
+| POST | `/api/v2/compile` | Recompile the curated graph into deployment artifacts |
+| POST | `/api/v2/generate-tests` | Generate grounded pytest cases from the current graph |
+| GET  | `/api/v2/status` | Onboarding pipeline status |
+| GET  | `/api/v2/privacy/audit` | Read the append-only privacy audit log |
+| GET  | `/api/v2/privacy/status` | Current redaction level, local-only flag, and guardrail config |
 
 ### Analysis Request
 
@@ -190,25 +398,39 @@ strength. The LLM explains; it doesn't invent.
 ```
 impact-radar/
 ├── config/
-│   └── model_config.yaml       # All tuning parameters (LLM, embeddings, retrieval)
+│   └── model_config.yaml       # All tuning parameters (LLM, embeddings, retrieval, privacy)
 ├── data/
-│   ├── components/             # 12 component YAML definitions
-│   └── variants/               # 8 product variant YAML definitions
+│   ├── components/             # 12 component YAML definitions (seed data)
+│   └── variants/               # 8 product variant YAML definitions (seed data)
 ├── src/
 │   ├── core/
-│   │   └── llm_client.py       # OpenAI wrapper with retry logic
+│   │   ├── llm_client.py       # OpenAI wrapper with retry logic
+│   │   ├── sanitizer.py        # (V2) Secret/PII redaction engine
+│   │   └── privacy_guard.py    # (V2) Single gateway for external API calls
 │   ├── graph/
 │   │   ├── builder.py          # Builds NetworkX bipartite graph from YAML
 │   │   └── traverser.py        # BFS blast radius with cycle detection
 │   ├── rag/
 │   │   ├── embedder.py         # Converts YAML → embeddable documents
 │   │   ├── retriever.py        # Two-stage semantic search with aggregation
-│   │   └── vector_store.py     # Chroma wrapper
+│   │   ├── vector_store.py     # Chroma wrapper
+│   │   └── embedding_cache.py  # (V2) Persistent SHA-256 → vector cache
 │   ├── analyzer/
 │   │   ├── impact.py           # Orchestrates graph + RAG + LLM
 │   │   └── reporter.py         # Formats risk reports (terminal/JSON/MD)
+│   ├── ingestion/              # (V2) Universal codebase ingestion
+│   │   ├── scanner.py          #        Discover + classify files
+│   │   ├── parser.py           #        AST extraction of components/modules
+│   │   ├── engine.py           #        Scan → parse → graph → embed pipeline
+│   │   └── estimator.py        #        Dry-run cost projection (no API calls)
+│   ├── gap_analysis/           # (V2) Interactive graph refinement
+│   │   ├── detector.py         #        Find orphans, ambiguities, missing links
+│   │   └── analyzer.py         #        LLM-driven question/answer loop
+│   ├── recompiler/             # (V2) Persist curated graph for deployment
+│   │   ├── recompiler.py       #        Export YAMLs + embeddings + manifest
+│   │   └── test_generator.py   #        Auto-generate grounded pytest cases
 │   └── api/
-│       └── main.py             # FastAPI endpoints
+│       └── main.py             # FastAPI endpoints (V1 + V2)
 ├── scripts/
 │   ├── build_graph.py          # Inspect the dependency graph
 │   └── build_embeddings.py     # Index components into Chroma
@@ -217,8 +439,15 @@ impact-radar/
 │   ├── test_traverser.py       # 34 BFS + cycle + chain tests
 │   ├── test_impact.py          # 30 vector store + embedder + retriever tests
 │   ├── test_analyzer.py        # Analyzer scoring + reporter tests
-│   └── test_api.py             # FastAPI endpoint tests
-├── docs/                       # Zero-to-hero RAG curriculum (6 chapters)
+│   ├── test_api.py             # FastAPI V1 endpoint tests
+│   ├── test_ingestion.py       # (V2) Scanner + parser + engine tests
+│   ├── test_gap_analysis.py    # (V2) Detector + interactive analyzer tests
+│   ├── test_recompiler.py      # (V2) Compilation + test generator tests
+│   ├── test_api_v2.py          # (V2) V2 endpoint tests
+│   ├── test_security.py        # (V2) Sanitizer + privacy guard tests
+│   ├── test_cost_controls.py   # (V2) Cache + batched suggestions + estimator
+│   └── test_generated_impacts.py # (V2) Self-generated validation suite
+├── docs/                       # Zero-to-hero RAG curriculum (7 chapters)
 ├── Dockerfile
 ├── requirements.txt
 └── README.md
@@ -253,7 +482,7 @@ docker run -p 8000:8000 -e OPENAI_API_KEY="sk-..." impact-radar
 
 ## Learn RAG
 
-This project includes a 6-chapter educational curriculum in [`docs/`](docs/README.md) that teaches RAG from scratch. No ML background needed — just daily AI experience.
+This project includes a 7-chapter educational curriculum in [`docs/`](docs/README.md) that teaches RAG from scratch. No ML background needed — just daily AI experience.
 
 | Chapter | Topic |
 |---------|-------|
@@ -263,6 +492,7 @@ This project includes a 6-chapter educational curriculum in [`docs/`](docs/READM
 | [4. Retrieval Strategies](docs/04-retrieval-strategies.md) | Hybrid retrieval and two-stage search |
 | [5. Grounded Generation](docs/05-grounded-generation.md) | Prompt engineering and hallucination prevention |
 | [6. Architecture](docs/06-architecture-walkthrough.md) | Full pipeline walkthrough |
+| [7. V2 Evolution](docs/07-v2-evolution.md) | From seeded demo to self-adapting system: ingestion, gap analysis, recompilation, and the privacy layer |
 
 ---
 
