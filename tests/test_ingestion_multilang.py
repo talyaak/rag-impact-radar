@@ -414,3 +414,204 @@ class TestParserDispatch:
         parse_result = parser.parse(scan_result)
 
         assert any("Bad.csproj" in w for w in parse_result.warnings)
+
+
+# ── Mixed-language integration ───────────────────────────────────────
+
+
+class TestMixedLanguageIngestion:
+    def test_python_ts_csharp_repo_yields_one_of_each(self, tmp_path: Path) -> None:
+        # Python package with one class that meets the min-methods heuristic.
+        py_pkg = tmp_path / "py_svc"
+        py_pkg.mkdir()
+        (py_pkg / "__init__.py").write_text("")
+        (py_pkg / "worker.py").write_text(textwrap.dedent('''\
+            """Background worker."""
+
+
+            class Worker:
+                """Processes jobs from a queue."""
+
+                def start(self) -> None:
+                    pass
+
+                def stop(self) -> None:
+                    pass
+
+                def handle(self, job) -> None:
+                    pass
+        '''))
+
+        # TypeScript package (tsconfig makes it typescript, not javascript).
+        _write_package_json(tmp_path / "web" / "package.json", {
+            "name": "web-ui",
+            "description": "Storefront UI.",
+            "dependencies": {"react": "^18.0.0"},
+        })
+        (tmp_path / "web" / "tsconfig.json").write_text("{}")
+
+        # C# project.
+        _write_file(tmp_path / "api" / "Api.csproj", textwrap.dedent("""\
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <AssemblyName>Api</AssemblyName>
+                <Description>Backend API.</Description>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Serilog" Version="3.1.1" />
+              </ItemGroup>
+            </Project>
+        """))
+
+        from src.ingestion.engine import IngestionEngine
+
+        engine = IngestionEngine(component_detection="class")
+        result = engine.ingest(tmp_path)
+
+        by_lang: dict[str, int] = {}
+        for c in result.parse_result.components:
+            by_lang[c.language] = by_lang.get(c.language, 0) + 1
+
+        assert by_lang.get("python", 0) >= 1
+        assert by_lang.get("typescript", 0) == 1
+        assert by_lang.get("csharp", 0) == 1
+
+        summary = result.summary()
+        assert "components_by_language" in summary
+        assert summary["components_by_language"].get("typescript") == 1
+        assert summary["components_by_language"].get("csharp") == 1
+
+    def test_disabling_python_runs_manifests_only(self, tmp_path: Path) -> None:
+        # A Python file that would otherwise produce a component…
+        py_pkg = tmp_path / "py_svc"
+        py_pkg.mkdir()
+        (py_pkg / "worker.py").write_text(textwrap.dedent('''\
+            class Worker:
+                def a(self) -> None: ...
+                def b(self) -> None: ...
+        '''))
+
+        _write_package_json(tmp_path / "web" / "package.json", {
+            "name": "web",
+            "description": "Web.",
+        })
+
+        scanner = CodebaseScanner()
+        scan_result = scanner.scan(tmp_path)
+
+        parser = CodebaseParser(
+            component_detection="class",
+            languages={"typescript", "javascript"},  # no python
+        )
+        parse_result = parser.parse(scan_result)
+
+        langs = {c.language for c in parse_result.components}
+        assert "python" not in langs
+        assert "javascript" in langs
+
+
+# ── artifact_granularity ─────────────────────────────────────────────
+
+
+class TestArtifactGranularity:
+    def _write_workspace_repo(self, tmp_path: Path) -> None:
+        """Root package.json declares workspaces: ["packages/*"]."""
+        _write_package_json(tmp_path / "package.json", {
+            "name": "monorepo",
+            "description": "Root monorepo.",
+            "workspaces": ["packages/*"],
+            "dependencies": {"lerna": "^8.0.0"},
+        })
+        _write_package_json(tmp_path / "packages" / "ui" / "package.json", {
+            "name": "@mono/ui",
+            "description": "UI package.",
+            "dependencies": {"react": "^18.0.0"},
+        })
+        _write_package_json(tmp_path / "packages" / "api" / "package.json", {
+            "name": "@mono/api",
+            "description": "API package.",
+            "dependencies": {"express": "^4.0.0"},
+        })
+
+    def test_manifest_default_emits_root_and_workspaces(self, tmp_path: Path) -> None:
+        self._write_workspace_repo(tmp_path)
+
+        scanner = CodebaseScanner()
+        scan_result = scanner.scan(tmp_path)
+
+        parser = CodebaseParser()  # default: manifest
+        parse_result = parser.parse(scan_result)
+
+        ids = {c.id for c in parse_result.components}
+        assert "monorepo" in ids
+        assert "mono__ui" in ids
+        assert "mono__api" in ids
+
+    def test_app_granularity_collapses_workspaces_into_root(self, tmp_path: Path) -> None:
+        self._write_workspace_repo(tmp_path)
+
+        scanner = CodebaseScanner()
+        scan_result = scanner.scan(tmp_path)
+
+        parser = CodebaseParser(artifact_granularity="app")
+        parse_result = parser.parse(scan_result)
+
+        ids = {c.id for c in parse_result.components}
+        assert "monorepo" in ids
+        assert "mono__ui" not in ids
+        assert "mono__api" not in ids
+
+        # The root should have accumulated its workspaces' deps.
+        root = next(c for c in parse_result.components if c.id == "monorepo")
+        module_ids = {m["module_id"] for m in root.modules}
+        assert "lerna" in module_ids
+        assert "react" in module_ids
+        assert "express" in module_ids
+
+        # No module.used_by should reference the dropped ids.
+        dropped = {"mono__ui", "mono__api"}
+        for mod in parse_result.modules:
+            assert not dropped & set(mod.used_by)
+
+    def test_service_granularity_merges_manifests_in_boundary(self, tmp_path: Path) -> None:
+        # A service directory marked by a Dockerfile, containing two csprojs.
+        svc = tmp_path / "checkout_service"
+        svc.mkdir()
+        (svc / "Dockerfile").write_text("FROM mcr.microsoft.com/dotnet/sdk:8.0\n")
+        _write_file(svc / "Api" / "Api.csproj", textwrap.dedent("""\
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <AssemblyName>Api</AssemblyName>
+                <Description>Checkout API.</Description>
+              </PropertyGroup>
+            </Project>
+        """))
+        _write_file(svc / "Core" / "Core.csproj", textwrap.dedent("""\
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <AssemblyName>Core</AssemblyName>
+                <Description>Checkout domain logic.</Description>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+              </ItemGroup>
+            </Project>
+        """))
+
+        scanner = CodebaseScanner()
+        scan_result = scanner.scan(tmp_path)
+
+        parser = CodebaseParser(artifact_granularity="service")
+        parse_result = parser.parse(scan_result)
+
+        csharp_ids = {c.id for c in parse_result.components if c.language == "csharp"}
+        # Before granularity: {"api", "core"}. After "service" collapse:
+        # exactly one remains and it absorbs the other's modules.
+        assert len(csharp_ids) == 1
+        survivor = next(c for c in parse_result.components if c.language == "csharp")
+        module_ids = {m["module_id"] for m in survivor.modules}
+        assert "newtonsoft_json" in module_ids
+
+    def test_invalid_granularity_raises(self) -> None:
+        with pytest.raises(ValueError):
+            CodebaseParser(artifact_granularity="bogus")
