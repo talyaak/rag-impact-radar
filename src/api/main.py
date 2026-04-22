@@ -50,6 +50,7 @@ from src.graph.traverser import ImpactTraverser
 from src.rag.vector_store import VectorStore
 from src.rag.embedder import ComponentEmbedder
 from src.rag.retriever import SemanticRetriever
+from src.core.learning_narrator import narrate
 from src.core.llm_client import LLMClient
 from src.core.privacy_guard import PrivacyGuard
 from src.ingestion.engine import IngestionEngine
@@ -91,6 +92,8 @@ async def _lifespan(app: FastAPI):  # noqa: ANN201, ARG001
     """
     global _dep_graph, _vector_store, _retriever, _llm_client, _privacy_guard  # noqa: PLW0603
 
+    narrate("startup")
+
     # ── Initialize Privacy Guard (before any external API calls) ────
     logger.info("Initializing privacy guard")
     _privacy_guard = PrivacyGuard.from_config(_CONFIG_PATH)
@@ -104,6 +107,7 @@ async def _lifespan(app: FastAPI):  # noqa: ANN201, ARG001
 
     logger.info("Building dependency graph from %s / %s", _COMPONENTS_DIR, _VARIANTS_DIR)
     _dep_graph = DependencyGraph(_COMPONENTS_DIR, _VARIANTS_DIR)
+    narrate("seed_data_loaded")
 
     logger.info("Connecting to vector store")
     _vector_store = VectorStore(config_path=_CONFIG_PATH)

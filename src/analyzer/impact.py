@@ -236,6 +236,10 @@ class ImpactAnalyzer:
             ↓
           Output: AnalysisResult ready for the reporter
         """
+        from src.core.learning_narrator import narrate
+
+        narrate("analyze.retrieval", extra={"changed": ",".join(changed_components)})
+
         # ── 1. Graph traversal ──────────────────────────────────────
         graph_result = self._traverser.traverse(changed_components)
 
@@ -462,8 +466,11 @@ class ImpactAnalyzer:
         within context window limits. Each prompt includes only the
         evidence relevant to THAT variant's affected components.
         """
+        from src.core.learning_narrator import narrate
+
         assert self._llm is not None
 
+        narrate("analyze.generation", extra={"variants": len(variant_risks)})
         system_prompt = self._build_system_prompt()
 
         for vid, vr in variant_risks.items():

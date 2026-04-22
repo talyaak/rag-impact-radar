@@ -121,6 +121,9 @@ class GapDetector:
 
     def detect(self) -> GapReport:
         """Run all gap detection checks and return a report."""
+        from src.core.learning_narrator import narrate
+
+        narrate("gaps.detect")
         report = GapReport(
             total_components=len(self._graph.get_components()),
             total_modules=self._graph.summary()["module_count"],

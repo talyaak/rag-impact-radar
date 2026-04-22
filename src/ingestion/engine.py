@@ -22,6 +22,7 @@ import yaml
 from src.graph.builder import DependencyGraph
 from src.rag.vector_store import VectorStore
 from src.rag.embedder import ComponentEmbedder
+from src.core.learning_narrator import narrate
 from src.ingestion.scanner import CodebaseScanner, ScanResult
 from src.ingestion.parser import CodebaseParser, ParseResult, ExtractedComponent
 
@@ -115,12 +116,14 @@ class IngestionEngine:
         logger.info("Starting ingestion of %s", repo_root)
 
         # Phase 1: Scan
+        narrate("ingest.scan", extra={"repo_root": str(repo_root)})
         logger.info("Phase 1: Scanning repository")
         scanner = CodebaseScanner(max_file_size_bytes=self._max_file_size)
         scan_result = scanner.scan(repo_root)
         logger.info("Scan complete: %s", scan_result.summary())
 
         # Phase 2: Parse
+        narrate("ingest.parse")
         logger.info("Phase 2: Parsing source files")
         parser = CodebaseParser(
             component_detection=self._detection,
@@ -132,6 +135,7 @@ class IngestionEngine:
         logger.info("Parse complete: %s", parse_result.summary())
 
         # Phase 3: Build graph
+        narrate("ingest.graph")
         logger.info("Phase 3: Building dependency graph")
         graph = existing_graph or DependencyGraph()
 

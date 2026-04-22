@@ -244,12 +244,16 @@ class GapAnalyzer:
         asks for a JSON array of suggestions. Falls back to per-gap calls
         if batch_size == 1 or JSON parsing fails.
         """
+        from src.core.learning_narrator import narrate
+
         if self._llm is None:
             return
 
         unresolved = gap_report.unresolved
         if not unresolved:
             return
+
+        narrate("gaps.suggest", extra={"unresolved_gaps": len(unresolved)})
 
         graph_context = self._build_graph_context()
         batch_size = self._suggestion_batch_size

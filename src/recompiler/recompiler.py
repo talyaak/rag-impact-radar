@@ -96,6 +96,9 @@ class DynamicRecompiler:
         Returns:
             CompilationResult with details of what was written.
         """
+        from src.core.learning_narrator import narrate
+
+        narrate("compile.export")
         result = CompilationResult(output_dir=self._output_dir)
 
         # Phase 1: Validate graph state

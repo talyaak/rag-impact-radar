@@ -221,10 +221,13 @@ class ComponentEmbedder:
           2. Flexibility — swap OpenAI for Cohere, local models, etc.
           3. Cost control — use cheaper embeddings for development
         """
+        from src.core.learning_narrator import narrate
+
         if reset:
             self._store.reset()
 
         documents = self.prepare_documents()
+        narrate("embedding.index", extra={"documents": len(documents)})
 
         if not documents:
             return 0
