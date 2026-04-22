@@ -66,6 +66,22 @@ ingestion:
   component_detection: "auto"    # auto | directory | class
   min_class_methods: 2           # Minimum methods for a class to be a component
   max_file_size_bytes: 5000000   # Skip files larger than 5MB
+  # Which language manifests to extract components from. Python uses AST
+  # on .py files; the others are manifest-driven (package.json / .csproj).
+  # Drop entries here to disable a language completely.
+  languages:
+    - "python"
+    - "typescript"
+    - "javascript"
+    - "csharp"
+  # How coarse each emitted component is:
+  #   "manifest" — one component per package.json / .csproj (default,
+  #                information-preserving; coarser views derive via aggregation).
+  #   "app"      — collapse nested workspace packages into their root package.json.
+  #                Useful when you publish one app, not N sub-packages.
+  #   "service"  — aggregate all manifests inside a service boundary (a dir
+  #                with a Dockerfile, .sln, etc.) into one component.
+  artifact_granularity: "manifest"
   ignore_patterns:               # Directories to skip during scanning
     - ".git"
     - "__pycache__"

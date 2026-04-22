@@ -41,6 +41,10 @@ class IngestionResult:
     warnings: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
+        by_language: dict[str, int] = {}
+        for comp in self.parse_result.components:
+            lang = getattr(comp, "language", "python")
+            by_language[lang] = by_language.get(lang, 0) + 1
         return {
             "scan": self.scan_result.summary(),
             "parse": self.parse_result.summary(),
@@ -48,6 +52,7 @@ class IngestionResult:
             "documents_embedded": self.documents_embedded,
             "components_ingested": self.components_ingested,
             "modules_ingested": self.modules_ingested,
+            "components_by_language": by_language,
             "warnings": self.warnings,
         }
 
@@ -72,6 +77,12 @@ class IngestionEngine:
         ingestion_config = self._config.get("ingestion", {})
         self._min_class_methods = ingestion_config.get("min_class_methods", 2)
         self._max_file_size = ingestion_config.get("max_file_size_bytes", 5_000_000)
+        raw_languages = ingestion_config.get("languages")
+        if raw_languages is None:
+            self._languages: set[str] | None = None
+        else:
+            self._languages = {str(lang).lower() for lang in raw_languages}
+        self._artifact_granularity = ingestion_config.get("artifact_granularity", "manifest")
         self._persist_dir = persist_directory
 
     def _load_config(self) -> dict[str, Any]:
@@ -114,6 +125,8 @@ class IngestionEngine:
         parser = CodebaseParser(
             component_detection=self._detection,
             min_class_methods=self._min_class_methods,
+            languages=self._languages,
+            artifact_granularity=self._artifact_granularity,
         )
         parse_result = parser.parse(scan_result)
         logger.info("Parse complete: %s", parse_result.summary())

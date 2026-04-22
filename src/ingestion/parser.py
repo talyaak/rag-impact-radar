@@ -13,6 +13,7 @@ the bipartite dependency graph and vector store.
 from __future__ import annotations
 
 import ast
+import fnmatch
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -205,6 +206,33 @@ _SLN_PROJECT_RE = re.compile(
 )
 
 
+def _extract_workspace_patterns(package_json_data: dict[str, Any]) -> list[str]:
+    """Return the workspace glob patterns declared by a package.json.
+
+    Supports both the npm array form (``"workspaces": ["packages/*"]``)
+    and the yarn object form (``"workspaces": {"packages": [...]}``).
+    Returns an empty list when no valid patterns are declared.
+    """
+    ws = package_json_data.get("workspaces")
+    if isinstance(ws, list):
+        return [p for p in ws if isinstance(p, str)]
+    if isinstance(ws, dict):
+        packages = ws.get("packages")
+        if isinstance(packages, list):
+            return [p for p in packages if isinstance(p, str)]
+    return []
+
+
+def _merge_module_refs(target: "ExtractedComponent", source: "ExtractedComponent") -> None:
+    """Merge ``source.modules`` into ``target.modules`` without duplicating ids."""
+    existing = {m["module_id"] for m in target.modules}
+    for ref in source.modules:
+        if ref.get("module_id") in existing:
+            continue
+        target.modules.append(ref)
+        existing.add(ref.get("module_id", ""))
+
+
 class CodebaseParser:
     """Parses scanned source files to extract components and dependencies.
 
@@ -217,6 +245,7 @@ class CodebaseParser:
         component_detection: str = "auto",
         min_class_methods: int = 2,
         languages: set[str] | None = None,
+        artifact_granularity: str = "manifest",
     ) -> None:
         """
         Args:
@@ -228,6 +257,10 @@ class CodebaseParser:
             languages: Which language manifests to parse. Defaults to all supported
                 ({"python", "typescript", "javascript", "csharp"}). An empty set
                 disables all manifest parsers and falls back to Python-only.
+            artifact_granularity: Coarseness of manifest-derived components.
+                "manifest" (default) emits one component per package.json / .csproj.
+                "app" collapses nested workspace packages into their root manifest.
+                "service" aggregates all manifests inside a service boundary into one.
         """
         self._detection = component_detection
         self._min_methods = min_class_methods
@@ -236,6 +269,12 @@ class CodebaseParser:
             if languages is None
             else set(languages)
         )
+        if artifact_granularity not in ("manifest", "app", "service"):
+            raise ValueError(
+                f"artifact_granularity must be one of 'manifest', 'app', 'service'; "
+                f"got {artifact_granularity!r}"
+            )
+        self._granularity = artifact_granularity
 
     def parse(self, scan_result: ScanResult) -> ParseResult:
         """Parse all scanned files and extract structural information."""
@@ -275,6 +314,10 @@ class CodebaseParser:
 
         # Phase 6: Extract components from non-Python manifest files
         self._extract_from_manifests(scan_result, result)
+
+        # Phase 7: Coarsen manifest-level components per artifact_granularity
+        if self._granularity != "manifest":
+            self._apply_granularity(scan_result, result)
 
         return result
 
@@ -486,6 +529,143 @@ class CodebaseParser:
                     used_by=[comp_id],
                 ))
         return component, modules
+
+    def _apply_granularity(
+        self,
+        scan_result: ScanResult,
+        result: ParseResult,
+    ) -> None:
+        """Collapse manifest-level components per ``artifact_granularity``.
+
+        Both "app" and "service" are reductions on top of the manifest-level
+        output. Python components are never touched — this only operates on
+        manifest-derived components (language in {typescript, javascript, csharp}).
+        """
+        if self._granularity == "app":
+            self._collapse_by_workspaces(scan_result, result)
+        elif self._granularity == "service":
+            self._collapse_by_service_boundary(scan_result, result)
+
+    def _collapse_by_workspaces(
+        self,
+        scan_result: ScanResult,
+        result: ParseResult,
+    ) -> None:
+        """Merge nested workspace package.json components into their root.
+
+        A "root" is any package.json whose JSON declares a top-level
+        ``workspaces`` field (npm/yarn workspace protocol). Nested
+        package.json manifests whose directory matches one of the root's
+        workspace glob patterns get their modules merged into the root
+        component and are dropped from the component list.
+        """
+        repo_root = scan_result.repo_root
+        roots: dict[Path, tuple[ExtractedComponent, list[str]]] = {}
+
+        for comp in result.components:
+            if comp.language not in {"javascript", "typescript"}:
+                continue
+            manifest_path = repo_root / comp.source_file
+            try:
+                data = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            patterns = _extract_workspace_patterns(data)
+            if patterns:
+                roots[manifest_path.parent.resolve()] = (comp, patterns)
+
+        if not roots:
+            return
+
+        kept: list[ExtractedComponent] = []
+        for comp in result.components:
+            if comp.language not in {"javascript", "typescript"}:
+                kept.append(comp)
+                continue
+            manifest_path = (repo_root / comp.source_file).resolve()
+            if manifest_path.parent in roots:
+                # Component is itself a workspace root — keep it.
+                kept.append(comp)
+                continue
+            matched: ExtractedComponent | None = None
+            for root_dir, (root_comp, patterns) in roots.items():
+                try:
+                    rel = manifest_path.parent.relative_to(root_dir)
+                except ValueError:
+                    continue
+                rel_str = str(rel).replace("\\", "/")
+                for pattern in patterns:
+                    pattern_norm = pattern.replace("\\", "/").rstrip("/")
+                    if fnmatch.fnmatch(rel_str, pattern_norm) or fnmatch.fnmatch(
+                        rel_str, pattern_norm + "/*"
+                    ):
+                        matched = root_comp
+                        break
+                if matched is not None:
+                    break
+            if matched is None:
+                kept.append(comp)
+            else:
+                # Merge this component's modules into the matched root.
+                _merge_module_refs(matched, comp)
+
+        # Rewire ExtractedModule.used_by so dropped comp ids no longer appear.
+        dropped_ids = {c.id for c in result.components} - {c.id for c in kept}
+        if dropped_ids:
+            for module in result.modules:
+                module.used_by = [u for u in module.used_by if u not in dropped_ids]
+
+        result.components = kept
+
+    def _collapse_by_service_boundary(
+        self,
+        scan_result: ScanResult,
+        result: ParseResult,
+    ) -> None:
+        """Merge all manifest components within a service boundary into one.
+
+        For each ``ServiceBoundary`` discovered by the scanner, pick a lead
+        component (the one whose source_file is closest to the boundary root)
+        and merge the modules of any other manifest components inside the
+        boundary into it. Python components are not touched.
+        """
+        repo_root = scan_result.repo_root
+        manifest_comps_by_id = {
+            c.id: c for c in result.components
+            if c.language in {"javascript", "typescript", "csharp"}
+        }
+        if not manifest_comps_by_id:
+            return
+
+        absorbed_ids: set[str] = set()
+        for boundary in scan_result.service_boundaries:
+            members: list[ExtractedComponent] = []
+            for comp in manifest_comps_by_id.values():
+                if comp.id in absorbed_ids:
+                    continue
+                comp_dir = (repo_root / comp.source_file).parent.resolve()
+                try:
+                    comp_dir.relative_to(boundary.root_dir.resolve())
+                except ValueError:
+                    continue
+                members.append(comp)
+            if len(members) < 2:
+                continue
+            # Lead: the manifest closest to the boundary root.
+            members.sort(
+                key=lambda c: len((repo_root / c.source_file).parent.resolve().parts)
+            )
+            lead = members[0]
+            for follower in members[1:]:
+                _merge_module_refs(lead, follower)
+                absorbed_ids.add(follower.id)
+
+        if absorbed_ids:
+            result.components = [c for c in result.components if c.id not in absorbed_ids]
+            for module in result.modules:
+                module.used_by = [u for u in module.used_by if u not in absorbed_ids]
 
     def _analyze_csproj(
         self,
